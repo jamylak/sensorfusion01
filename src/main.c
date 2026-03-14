@@ -907,6 +907,49 @@ static void draw_interactive_covariance_timeline(const BlueprintEngine *engine, 
     if (inspector != NULL) inspector->timeline_index = hover_index;
 }
 
+static const char *measurement_axis_label(int index) {
+    static const char *labels[] = {"mx", "my"};
+    if (index < 0 || index >= (int)(sizeof(labels) / sizeof(labels[0]))) {
+        return "?";
+    }
+    return labels[index];
+}
+
+static void draw_sensor_matrix_panel(const BlueprintEngine *engine, const Matrix *matrix, DVec2 origin, float cell_size, const char *title, const char *sensor_name, bool measurement_covariance, MatrixInspector *inspector, int selected_row, int selected_col, bool *out_hovered_cell, int *out_row, int *out_col) {
+    int hover_row = -1;
+    int hover_col = -1;
+    bool cell_hover = hover_matrix_cell_world(engine, origin, matrix->rows, matrix->cols, cell_size, &hover_row, &hover_col);
+    if (out_hovered_cell != NULL) *out_hovered_cell = cell_hover;
+    if (out_row != NULL) *out_row = hover_row;
+    if (out_col != NULL) *out_col = hover_col;
+
+    if (hover_matrix_title_screen(engine, origin, cell_size, title)) {
+        char body[320];
+        if (measurement_covariance) {
+            snprintf(body, sizeof(body), "%s measurement noise covariance. These entries describe uncertainty and coupling in the %s update.", sensor_name, sensor_name);
+        } else {
+            snprintf(body, sizeof(body), "%s observation model. Each row maps state dimensions into the %s measurement space.", sensor_name, sensor_name);
+        }
+        set_matrix_inspector(inspector, title, body);
+    }
+
+    if (cell_hover) {
+        char body[320];
+        if (measurement_covariance) {
+            snprintf(body, sizeof(body), "%s[%s,%s] = %.3f. %s noise covariance between measurement axes.", title, measurement_axis_label(hover_row), measurement_axis_label(hover_col), matrix_get(matrix, hover_row, hover_col), sensor_name);
+        } else {
+            snprintf(body, sizeof(body), "%s[%s,%s] = %.3f. %s maps state %s into measurement %s.", title, measurement_axis_label(hover_row), state_axis_label(hover_col), matrix_get(matrix, hover_row, hover_col), sensor_name, state_axis_label(hover_col), measurement_axis_label(hover_row));
+        }
+        set_matrix_inspector(inspector, title, body);
+    }
+
+    blueprint_draw_matrix_heatmap(engine, matrix, origin, cell_size, true,
+                                  selected_row, selected_col,
+                                  cell_hover ? hover_row : selected_row,
+                                  cell_hover ? hover_col : selected_col,
+                                  title);
+}
+
 static void debugger_execute_current_step(FusionSceneData *scene) {
     if (scene == NULL || scene->debugger.step_count == 0) return;
     AlgorithmStep *step = &scene->debugger.steps[scene->debugger.current_step];
@@ -1005,8 +1048,26 @@ static void draw_fusion_scene_node(Camera2D cam) {
         linked_row = hover_row;
         linked_col = hover_col;
     }
-    blueprint_draw_sensor_model_box(engine, &g_fusion_scene->gps_sensor, dvec2(-220.0, 420.0), g_fusion_scene->cell_size, "GPS sensor");
-    blueprint_draw_sensor_model_box(engine, &g_fusion_scene->camera_sensor, dvec2(340.0, 420.0), g_fusion_scene->cell_size, "Camera sensor");
+    draw_sensor_matrix_panel(engine, &g_fusion_scene->gps_sensor.H, dvec2(-220.0, 420.0), g_fusion_scene->cell_size, "GPS sensor", "GPS", false, &matrix_inspector, linked_row, linked_col, &hovered_cell, &hover_row, &hover_col);
+    if (hovered_cell) {
+        linked_row = hover_row;
+        linked_col = hover_col;
+    }
+    draw_sensor_matrix_panel(engine, &g_fusion_scene->gps_sensor.R, dvec2(-220.0, 420.0 + g_fusion_scene->gps_sensor.H.rows * g_fusion_scene->cell_size + g_fusion_scene->cell_size * 1.3), g_fusion_scene->cell_size, "R_gps", "GPS", true, &matrix_inspector, linked_row, linked_col, &hovered_cell, &hover_row, &hover_col);
+    if (hovered_cell) {
+        linked_row = hover_row;
+        linked_col = hover_col;
+    }
+    draw_sensor_matrix_panel(engine, &g_fusion_scene->camera_sensor.H, dvec2(340.0, 420.0), g_fusion_scene->cell_size, "Camera sensor", "Camera", false, &matrix_inspector, linked_row, linked_col, &hovered_cell, &hover_row, &hover_col);
+    if (hovered_cell) {
+        linked_row = hover_row;
+        linked_col = hover_col;
+    }
+    draw_sensor_matrix_panel(engine, &g_fusion_scene->camera_sensor.R, dvec2(340.0, 420.0 + g_fusion_scene->camera_sensor.H.rows * g_fusion_scene->cell_size + g_fusion_scene->cell_size * 1.3), g_fusion_scene->cell_size, "R_cam", "Camera", true, &matrix_inspector, linked_row, linked_col, &hovered_cell, &hover_row, &hover_col);
+    if (hovered_cell) {
+        linked_row = hover_row;
+        linked_col = hover_col;
+    }
     blueprint_draw_kalman_gain_heatmap(engine, &g_fusion_scene->gps_internals, dvec2(900.0, 420.0), g_fusion_scene->cell_size, "K_gps");
     blueprint_draw_kalman_gain_heatmap(engine, &g_fusion_scene->camera_internals, dvec2(1320.0, 420.0), g_fusion_scene->cell_size, "K_cam");
     blueprint_draw_vector_visual(engine, &g_fusion_scene->gps_internals.innovation, dvec2(900.0, 120.0), g_fusion_scene->cell_size * 0.9f, true, "gps innovation", (Color){248, 176, 102, 255});
