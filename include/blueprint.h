@@ -35,6 +35,12 @@ typedef struct GaussianState {
     Matrix covariance;
 } GaussianState;
 
+typedef struct TrueVehicle {
+    Vector2 position;
+    Vector2 velocity;
+    double heading;
+} TrueVehicle;
+
 typedef struct Measurement {
     Vector z;
     Matrix H;

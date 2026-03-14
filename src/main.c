@@ -15,6 +15,13 @@
 #define GRAPH_ID_STRIDE 300
 #define GRAPH_ANCHOR_BASE_ID 1200
 
+enum {
+    CAUSAL_NONE = 0,
+    CAUSAL_IMU,
+    CAUSAL_GPS,
+    CAUSAL_CAMERA
+};
+
 typedef struct {
     Matrix *a;
     Matrix *b;
@@ -40,6 +47,7 @@ typedef struct {
 } MathSceneData;
 
 typedef struct {
+    TrueVehicle true_vehicle;
     GaussianState prior_state;
     GaussianState state_estimate;
     GaussianState predicted_state;
@@ -105,6 +113,17 @@ typedef struct {
     DVec2 last_true_position;
     double last_theta;
     double last_time;
+    double next_gps_time;
+    double next_camera_time;
+    double last_imu_sample_time;
+    double last_gps_sample_time;
+    double last_camera_sample_time;
+    double last_imu_dt;
+    bool gps_event_active;
+    bool camera_event_active;
+    bool imu_event_active;
+    int causal_focus;
+    double causal_focus_until;
     FactorGraph factor_graph;
     VehicleTrack vehicle_tracks[MAX_VEHICLE_TRACKS];
     int vehicle_track_count;
@@ -775,8 +794,17 @@ static void initialize_fusion_scene(FusionSceneData *scene) {
     matrix_set(&scene->process_noise, 2, 2, 36.0);
     matrix_set(&scene->process_noise, 3, 3, 36.0);
     matrix_set(&scene->process_noise, 4, 4, 0.02);
+    scene->true_vehicle.position = (Vector2){(float)scene->state_estimate.mean.data[0], (float)scene->state_estimate.mean.data[1]};
+    scene->true_vehicle.velocity = (Vector2){(float)scene->state_estimate.mean.data[2], (float)scene->state_estimate.mean.data[3]};
+    scene->true_vehicle.heading = scene->state_estimate.mean.data[4];
     scene->last_true_position = dvec2(scene->state_estimate.mean.data[0], scene->state_estimate.mean.data[1]);
     scene->last_theta = scene->state_estimate.mean.data[4];
+    scene->next_gps_time = 0.8;
+    scene->next_camera_time = 0.18;
+    scene->last_imu_sample_time = 0.0;
+    scene->last_gps_sample_time = -1.0;
+    scene->last_camera_sample_time = -1.0;
+    scene->last_imu_dt = 0.0;
     copy_gaussian_state(&scene->prior_state, &scene->state_estimate);
     copy_gaussian_state(&scene->predicted_state, &scene->state_estimate);
     copy_gaussian_state(&scene->gps_corrected_state, &scene->state_estimate);
@@ -807,6 +835,13 @@ static void advance_fusion_scene(FusionSceneData *scene, const BlueprintEngine *
     double true_theta = atan2(true_vy, true_vx);
     double true_omega = (true_theta - scene->last_theta) / dt;
     scene->last_theta = true_theta;
+    scene->true_vehicle.position = (Vector2){(float)true_x, (float)true_y};
+    scene->true_vehicle.velocity = (Vector2){(float)true_vx, (float)true_vy};
+    scene->true_vehicle.heading = true_theta;
+    scene->imu_event_active = true;
+    scene->gps_event_active = false;
+    scene->camera_event_active = false;
+    scene->last_imu_dt = dt;
 
     double c = cos(scene->state_estimate.mean.data[4]);
     double s = sin(scene->state_estimate.mean.data[4]);
@@ -821,25 +856,33 @@ static void advance_fusion_scene(FusionSceneData *scene, const BlueprintEngine *
     copy_matrix_values(&scene->imu_process_view, &scene->process_noise);
     copy_kalman_internals(&scene->imu_internals, &scene->transition_jacobian, &scene->process_noise, NULL, NULL, NULL, NULL, &scene->predicted_state.covariance, NULL);
     push_time_sample(scene->imu_event_times, &scene->imu_event_count, FUSION_EVENTS, t);
+    scene->last_imu_sample_time = t;
+    copy_gaussian_state(&scene->gps_corrected_state, &scene->predicted_state);
+    copy_gaussian_state(&scene->fused_state, &scene->predicted_state);
 
-    scene->gps_measurement.lat = true_x + 34.0 * sin(t * 0.47);
-    scene->gps_measurement.lon = true_y + 28.0 * cos(t * 0.38);
-    matrix_set(&scene->debug_predicted_measurement, 0, 0, scene->predicted_state.mean.data[0]);
-    matrix_set(&scene->debug_predicted_measurement, 1, 0, scene->predicted_state.mean.data[1]);
-    matrix_multiply_into(&scene->gps_sensor.H, &scene->predicted_state.covariance, &scene->debug_hp);
-    matrix_transpose_into(&scene->gps_sensor.H, &scene->debug_hpt);
-    gps_measurement_step(&scene->predicted_state, &scene->gps_sensor, &scene->gps_measurement, &scene->gps_residual, &scene->gps_gain, &scene->gps_corrected_state);
-    for (int r = 0; r < scene->debug_correction.rows; ++r) {
-        double sum = 0.0;
-        for (int c_idx = 0; c_idx < scene->debug_correction.cols && c_idx < scene->gps_residual.innovation.size; ++c_idx) {
-            sum += matrix_get(&scene->gps_gain, r, c_idx) * scene->gps_residual.innovation.data[c_idx];
+    if (t >= scene->next_gps_time) {
+        scene->gps_measurement.lat = true_x + 34.0 * sin(t * 0.47);
+        scene->gps_measurement.lon = true_y + 28.0 * cos(t * 0.38);
+        matrix_set(&scene->debug_predicted_measurement, 0, 0, scene->predicted_state.mean.data[0]);
+        matrix_set(&scene->debug_predicted_measurement, 1, 0, scene->predicted_state.mean.data[1]);
+        matrix_multiply_into(&scene->gps_sensor.H, &scene->predicted_state.covariance, &scene->debug_hp);
+        matrix_transpose_into(&scene->gps_sensor.H, &scene->debug_hpt);
+        gps_measurement_step(&scene->predicted_state, &scene->gps_sensor, &scene->gps_measurement, &scene->gps_residual, &scene->gps_gain, &scene->gps_corrected_state);
+        for (int r = 0; r < scene->debug_correction.rows; ++r) {
+            double sum = 0.0;
+            for (int c_idx = 0; c_idx < scene->debug_correction.cols && c_idx < scene->gps_residual.innovation.size; ++c_idx) {
+                sum += matrix_get(&scene->gps_gain, r, c_idx) * scene->gps_residual.innovation.data[c_idx];
+            }
+            matrix_set(&scene->debug_correction, r, 0, sum);
         }
-        matrix_set(&scene->debug_correction, r, 0, sum);
+        copy_kalman_internals(&scene->gps_internals, NULL, NULL, &scene->gps_sensor.H, &scene->gps_sensor.R, &scene->gps_gain, &scene->gps_residual.S, &scene->gps_corrected_state.covariance, &scene->gps_residual.innovation);
+        push_sample2(scene->gps_innovation_history, &scene->gps_innovation_count, FUSION_EVENTS, dvec2(scene->gps_residual.innovation.data[0], scene->gps_residual.innovation.data[1]));
+        push_time_sample(scene->gps_event_times, &scene->gps_event_count, FUSION_EVENTS, t);
+        push_graph_point(scene->gps_graph_points, scene->gps_graph_residuals, &scene->gps_graph_count, FUSION_EVENTS, dvec2(scene->gps_measurement.lat, scene->gps_measurement.lon), hypot(scene->gps_residual.innovation.data[0], scene->gps_residual.innovation.data[1]));
+        scene->gps_event_active = true;
+        scene->last_gps_sample_time = t;
+        scene->next_gps_time += 0.8;
     }
-    copy_kalman_internals(&scene->gps_internals, NULL, NULL, &scene->gps_sensor.H, &scene->gps_sensor.R, &scene->gps_gain, &scene->gps_residual.S, &scene->gps_corrected_state.covariance, &scene->gps_residual.innovation);
-    push_sample2(scene->gps_innovation_history, &scene->gps_innovation_count, FUSION_EVENTS, dvec2(scene->gps_residual.innovation.data[0], scene->gps_residual.innovation.data[1]));
-    push_time_sample(scene->gps_event_times, &scene->gps_event_count, FUSION_EVENTS, t);
-    push_graph_point(scene->gps_graph_points, scene->gps_graph_residuals, &scene->gps_graph_count, FUSION_EVENTS, dvec2(scene->gps_measurement.lat, scene->gps_measurement.lon), hypot(scene->gps_residual.innovation.data[0], scene->gps_residual.innovation.data[1]));
 
     if (scene->camera_measurement.pose_delta.rows >= 2) {
         matrix_set(&scene->camera_measurement.pose_delta, 0, 0, (true_x - scene->last_true_position.x) + 6.0 * sin(t * 0.8));
@@ -849,17 +892,32 @@ static void advance_fusion_scene(FusionSceneData *scene, const BlueprintEngine *
         }
     }
     scene->last_true_position = dvec2(true_x, true_y);
-    camera_measurement_step(&scene->gps_corrected_state, &scene->camera_sensor, &scene->camera_measurement, &scene->camera_residual, &scene->camera_gain, &scene->fused_state);
-    copy_kalman_internals(&scene->camera_internals, NULL, NULL, &scene->camera_sensor.H, &scene->camera_sensor.R, &scene->camera_gain, &scene->camera_residual.S, &scene->fused_state.covariance, &scene->camera_residual.innovation);
-    push_sample2(scene->camera_innovation_history, &scene->camera_innovation_count, FUSION_EVENTS, dvec2(scene->camera_residual.innovation.data[0], scene->camera_residual.innovation.data[1]));
-    push_time_sample(scene->camera_event_times, &scene->camera_event_count, FUSION_EVENTS, t);
-    {
-        DVec2 cam_from = dvec2(scene->gps_corrected_state.mean.data[0], scene->gps_corrected_state.mean.data[1]);
-        DVec2 cam_to = dvec2(scene->gps_corrected_state.mean.data[0] + matrix_get(&scene->camera_measurement.pose_delta, 0, 0),
-                             scene->gps_corrected_state.mean.data[1] + matrix_get(&scene->camera_measurement.pose_delta, 1, 0));
-        push_graph_edge(scene->camera_graph_from, scene->camera_graph_to, scene->camera_graph_weights, &scene->camera_graph_count, FUSION_EVENTS, cam_from, cam_to, 1.0 / (matrix_get(&scene->camera_sensor.R, 0, 0) + 1e-6));
+    if (t >= scene->next_camera_time) {
+        camera_measurement_step(&scene->gps_corrected_state, &scene->camera_sensor, &scene->camera_measurement, &scene->camera_residual, &scene->camera_gain, &scene->fused_state);
+        copy_kalman_internals(&scene->camera_internals, NULL, NULL, &scene->camera_sensor.H, &scene->camera_sensor.R, &scene->camera_gain, &scene->camera_residual.S, &scene->fused_state.covariance, &scene->camera_residual.innovation);
+        push_sample2(scene->camera_innovation_history, &scene->camera_innovation_count, FUSION_EVENTS, dvec2(scene->camera_residual.innovation.data[0], scene->camera_residual.innovation.data[1]));
+        push_time_sample(scene->camera_event_times, &scene->camera_event_count, FUSION_EVENTS, t);
+        {
+            DVec2 cam_from = dvec2(scene->gps_corrected_state.mean.data[0], scene->gps_corrected_state.mean.data[1]);
+            DVec2 cam_to = dvec2(scene->gps_corrected_state.mean.data[0] + matrix_get(&scene->camera_measurement.pose_delta, 0, 0),
+                                 scene->gps_corrected_state.mean.data[1] + matrix_get(&scene->camera_measurement.pose_delta, 1, 0));
+            push_graph_edge(scene->camera_graph_from, scene->camera_graph_to, scene->camera_graph_weights, &scene->camera_graph_count, FUSION_EVENTS, cam_from, cam_to, 1.0 / (matrix_get(&scene->camera_sensor.R, 0, 0) + 1e-6));
+        }
+        scene->camera_event_active = true;
+        scene->last_camera_sample_time = t;
+        scene->next_camera_time += 0.18;
     }
     copy_gaussian_state(&scene->state_estimate, &scene->fused_state);
+    if (scene->camera_event_active) {
+        scene->causal_focus = CAUSAL_CAMERA;
+        scene->causal_focus_until = t + 0.45;
+    } else if (scene->gps_event_active) {
+        scene->causal_focus = CAUSAL_GPS;
+        scene->causal_focus_until = t + 0.45;
+    } else {
+        scene->causal_focus = CAUSAL_IMU;
+        scene->causal_focus_until = t + 0.28;
+    }
     push_covariance_history(scene, &scene->fused_state.covariance);
     push_debug_frame(scene, &scene->gps_corrected_state, &scene->gps_internals);
     append_fusion_trajectory(scene, dvec2(true_x, true_y), dvec2(scene->predicted_state.mean.data[0], scene->predicted_state.mean.data[1]), dvec2(scene->fused_state.mean.data[0], scene->fused_state.mean.data[1]));
@@ -883,6 +941,60 @@ static void draw_velocity_arrow(const BlueprintEngine *engine, const GaussianSta
         Vector2 p = blueprint_world_to_screen(engine, to);
         DrawText(label, (int)p.x + 6, (int)p.y - 6, 13, color);
     }
+}
+
+static void draw_true_vehicle_marker(const BlueprintEngine *engine, const TrueVehicle *vehicle, Color color) {
+    DVec2 center = dvec2(vehicle->position.x, vehicle->position.y);
+    Vector2 p = blueprint_world_to_screen(engine, center);
+    DrawCircleV(p, 6.0f, color);
+    DVec2 nose = dvec2(center.x + cos(vehicle->heading) * 42.0, center.y + sin(vehicle->heading) * 42.0);
+    blueprint_draw_arrow(engine, center, nose, 2.1f, color);
+}
+
+static void draw_timestamp_label(const BlueprintEngine *engine, DVec2 world, double timestamp, Color color, const char *prefix) {
+    Vector2 p = blueprint_world_to_screen(engine, world);
+    char label[64];
+    snprintf(label, sizeof(label), "%s t=%.2f", prefix, timestamp);
+    DrawText(label, (int)p.x + 8, (int)p.y - 10, 12, color);
+}
+
+static void draw_causal_chain_overlay(const BlueprintEngine *engine, const FusionSceneData *scene) {
+    const char *title = "causal chain";
+    const char *steps_imu[] = {
+        "true vehicle motion",
+        "IMU accel / gyro sample",
+        "prediction step",
+        "covariance stretches"
+    };
+    const char *steps_gps[] = {
+        "true vehicle motion",
+        "GPS position sample",
+        "innovation vector",
+        "Kalman gain",
+        "state correction",
+        "covariance shrink"
+    };
+    const char *steps_cam[] = {
+        "true vehicle motion",
+        "camera pose delta",
+        "feature flow",
+        "innovation vector",
+        "Kalman gain",
+        "state correction"
+    };
+    const char **steps = steps_imu;
+    int step_count = 4;
+    Color color = (Color){118, 208, 255, 255};
+    if (scene->causal_focus == CAUSAL_GPS) {
+        steps = steps_gps;
+        step_count = 6;
+        color = (Color){248, 176, 102, 255};
+    } else if (scene->causal_focus == CAUSAL_CAMERA) {
+        steps = steps_cam;
+        step_count = 6;
+        color = (Color){196, 132, 255, 255};
+    }
+    blueprint_draw_equation_block(engine, dvec2(1120.0, -520.0), title, steps, step_count, color);
 }
 
 static const char *state_axis_label(int index) {
@@ -1354,6 +1466,10 @@ static void draw_fusion_scene_node(Camera2D cam) {
     DVec2 gps_meas = dvec2(g_fusion_scene->gps_measurement.lat, g_fusion_scene->gps_measurement.lon);
     DVec2 fused = dvec2(g_fusion_scene->fused_state.mean.data[0], g_fusion_scene->fused_state.mean.data[1]);
     DVec2 gps_corrected = dvec2(g_fusion_scene->gps_corrected_state.mean.data[0], g_fusion_scene->gps_corrected_state.mean.data[1]);
+    DVec2 true_vehicle = dvec2(g_fusion_scene->true_vehicle.position.x, g_fusion_scene->true_vehicle.position.y);
+    DVec2 imu_tip = dvec2(true_vehicle.x + g_fusion_scene->imu_measurement.accel.x * 24.0, true_vehicle.y + g_fusion_scene->imu_measurement.accel.y * 24.0);
+    DVec2 camera_point = dvec2(gps_corrected.x + matrix_get(&g_fusion_scene->camera_measurement.pose_delta, 0, 0),
+                               gps_corrected.y + matrix_get(&g_fusion_scene->camera_measurement.pose_delta, 1, 0));
     MatrixInspector matrix_inspector = {0};
     int linked_row = -1;
     int linked_col = -1;
@@ -1371,6 +1487,17 @@ static void draw_fusion_scene_node(Camera2D cam) {
     blueprint_draw_gaussian_state(engine, &g_fusion_scene->gps_corrected_state, (Color){248, 188, 116, 255}, "gps corrected");
     blueprint_draw_gaussian_state(engine, &g_fusion_scene->fused_state, (Color){112, 232, 176, 255}, "fused state");
     blueprint_draw_measurement_covariance(engine, gps_meas, &g_fusion_scene->gps_sensor.R, (Color){244, 170, 96, 255}, "gps R");
+    draw_true_vehicle_marker(engine, &g_fusion_scene->true_vehicle, (Color){236, 236, 242, 255});
+    blueprint_draw_signal_arrow(engine, true_vehicle, imu_tip, 1.8f, (Color){118, 208, 255, 255}, 0.0);
+    blueprint_draw_signal_arrow(engine, true_vehicle, gps_meas, 1.9f, (Color){248, 176, 102, 255}, 0.2);
+    blueprint_draw_signal_arrow(engine, true_vehicle, camera_point, 1.8f, (Color){196, 132, 255, 255}, 0.4);
+    draw_timestamp_label(engine, imu_tip, g_fusion_scene->last_imu_sample_time, (Color){118, 208, 255, 255}, "imu");
+    if (g_fusion_scene->last_gps_sample_time >= 0.0) {
+        draw_timestamp_label(engine, gps_meas, g_fusion_scene->last_gps_sample_time, (Color){248, 176, 102, 255}, "gps");
+    }
+    if (g_fusion_scene->last_camera_sample_time >= 0.0) {
+        draw_timestamp_label(engine, camera_point, g_fusion_scene->last_camera_sample_time, (Color){196, 132, 255, 255}, "cam");
+    }
     blueprint_draw_residual_visual(engine, predicted, gps_meas, &g_fusion_scene->gps_residual, (Color){248, 176, 102, 255}, "gps innovation");
     blueprint_draw_residual_visual(engine, gps_corrected, fused, &g_fusion_scene->camera_residual, (Color){196, 132, 255, 255}, "camera delta");
     blueprint_draw_feature_flow(engine, g_fusion_scene->feature_from, g_fusion_scene->feature_to, g_fusion_scene->feature_count, (Color){188, 132, 255, 180});
@@ -1472,6 +1599,7 @@ static void draw_fusion_scene_node(Camera2D cam) {
     blueprint_draw_execution_timeline(engine, &g_fusion_scene->debugger, dvec2(180.0, -300.0), (Vector2){900.0f, 210.0f}, "algorithm execution");
     debugger_draw_overlay();
     draw_matrix_inspector_box(&matrix_inspector);
+    draw_causal_chain_overlay(engine, g_fusion_scene);
 
     const char *lines[] = {
         "n/b step, p run-pause, u/o scrub history; the debugger exposes one atomic Kalman operation at a time",
