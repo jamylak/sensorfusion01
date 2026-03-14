@@ -1,4 +1,4 @@
-APP := blueprint_canvas
+APP := blueprint_math_canvas
 BUILD_DIR := build
 SRC_DIR := src
 INC_DIR := include

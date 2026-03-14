@@ -69,6 +69,18 @@ static DVec2 viewport_center(const BlueprintEngine *engine) {
     return dvec2(engine->camera.viewport_width * 0.5, engine->camera.top_bar_height + engine->camera.viewport_height * 0.5);
 }
 
+static Rectangle minimap_rect(const BlueprintEngine *engine) {
+    float width = 220.0f;
+    float height = 160.0f;
+    float margin = 16.0f;
+    return (Rectangle){
+        engine->camera.viewport_width - width - margin,
+        engine->camera.top_bar_height + engine->camera.viewport_height - height - margin,
+        width,
+        height
+    };
+}
+
 static void get_world_view_bounds(const BlueprintEngine *engine, DVec2 *out_min, DVec2 *out_max) {
     DVec2 top_left = blueprint_screen_to_world(engine, (Vector2){0.0f, engine->camera.top_bar_height});
     DVec2 bottom_right = blueprint_screen_to_world(engine, (Vector2){engine->camera.viewport_width, engine->camera.top_bar_height + engine->camera.viewport_height});
@@ -76,6 +88,114 @@ static void get_world_view_bounds(const BlueprintEngine *engine, DVec2 *out_min,
     out_min->y = fmin(top_left.y, bottom_right.y);
     out_max->x = fmax(top_left.x, bottom_right.x);
     out_max->y = fmax(top_left.y, bottom_right.y);
+}
+
+static void get_world_content_bounds(const BlueprintEngine *engine, DVec2 *out_min, DVec2 *out_max) {
+    DVec2 min = dvec2(-1000.0, -1000.0);
+    DVec2 max = dvec2(1000.0, 1000.0);
+    bool found = false;
+    for (size_t i = 0; i < engine->count; ++i) {
+        const BlueprintNode *node = &engine->nodes[i];
+        if (!node->visible || node->page != engine->active_page) {
+            continue;
+        }
+        if (!found) {
+            min = node->bounds_min;
+            max = node->bounds_max;
+            found = true;
+            continue;
+        }
+        min.x = fmin(min.x, node->bounds_min.x);
+        min.y = fmin(min.y, node->bounds_min.y);
+        max.x = fmax(max.x, node->bounds_max.x);
+        max.y = fmax(max.y, node->bounds_max.y);
+    }
+    double pad_x = fmax((max.x - min.x) * 0.08, 120.0);
+    double pad_y = fmax((max.y - min.y) * 0.08, 120.0);
+    out_min->x = min.x - pad_x;
+    out_min->y = min.y - pad_y;
+    out_max->x = max.x + pad_x;
+    out_max->y = max.y + pad_y;
+}
+
+static Vector2 minimap_world_to_screen(Rectangle map_rect, DVec2 world_min, DVec2 world_max, DVec2 point) {
+    double width = fmax(world_max.x - world_min.x, 1.0);
+    double height = fmax(world_max.y - world_min.y, 1.0);
+    float x = map_rect.x + (float)(((point.x - world_min.x) / width) * map_rect.width);
+    float y = map_rect.y + (float)(((point.y - world_min.y) / height) * map_rect.height);
+    return (Vector2){x, y};
+}
+
+static DVec2 minimap_screen_to_world(Rectangle map_rect, DVec2 world_min, DVec2 world_max, Vector2 point) {
+    double tx = clampd((point.x - map_rect.x) / map_rect.width, 0.0, 1.0);
+    double ty = clampd((point.y - map_rect.y) / map_rect.height, 0.0, 1.0);
+    return dvec2(
+        world_min.x + (world_max.x - world_min.x) * tx,
+        world_min.y + (world_max.y - world_min.y) * ty
+    );
+}
+
+static void handle_minimap_input(BlueprintEngine *engine, Vector2 mouse) {
+    Rectangle map_rect = minimap_rect(engine);
+    if (!CheckCollisionPointRec(mouse, map_rect)) {
+        return;
+    }
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        return;
+    }
+
+    DVec2 world_min;
+    DVec2 world_max;
+    get_world_content_bounds(engine, &world_min, &world_max);
+    DVec2 target = minimap_screen_to_world(map_rect, world_min, world_max, mouse);
+    engine->camera.target_goal_x = target.x;
+    engine->camera.target_goal_y = target.y;
+}
+
+static void draw_minimap(const BlueprintEngine *engine) {
+    Rectangle map_rect = minimap_rect(engine);
+    DVec2 world_min;
+    DVec2 world_max;
+    DVec2 view_min;
+    DVec2 view_max;
+    get_world_content_bounds(engine, &world_min, &world_max);
+    get_world_view_bounds(engine, &view_min, &view_max);
+
+    DrawRectangleRounded(map_rect, 0.06f, 8, Fade((Color){10, 14, 20, 255}, 0.94f));
+    DrawRectangleRoundedLinesEx(map_rect, 0.06f, 8, 1.5f, (Color){84, 102, 128, 255});
+
+    for (size_t i = 0; i < engine->count; ++i) {
+        const BlueprintNode *node = &engine->nodes[i];
+        Vector2 a = minimap_world_to_screen(map_rect, world_min, world_max, node->bounds_min);
+        Vector2 b = minimap_world_to_screen(map_rect, world_min, world_max, node->bounds_max);
+        float x = fminf(a.x, b.x);
+        float y = fminf(a.y, b.y);
+        float w = fabsf(b.x - a.x);
+        float h = fabsf(b.y - a.y);
+        if (w < 2.0f) w = 2.0f;
+        if (h < 2.0f) h = 2.0f;
+        if (x + w > map_rect.x + map_rect.width) w = map_rect.x + map_rect.width - x;
+        if (y + h > map_rect.y + map_rect.height) h = map_rect.y + map_rect.height - y;
+        DrawRectangleLinesEx((Rectangle){x, y, w, h}, 1.0f, (Color){102, 138, 178, 180});
+    }
+
+    Vector2 va = minimap_world_to_screen(map_rect, world_min, world_max, view_min);
+    Vector2 vb = minimap_world_to_screen(map_rect, world_min, world_max, view_max);
+    float vx = clampf(fminf(va.x, vb.x), map_rect.x, map_rect.x + map_rect.width);
+    float vy = clampf(fminf(va.y, vb.y), map_rect.y, map_rect.y + map_rect.height);
+    float vw = fabsf(vb.x - va.x);
+    float vh = fabsf(vb.y - va.y);
+    if (vw > map_rect.width) vw = map_rect.width;
+    if (vh > map_rect.height) vh = map_rect.height;
+    if (vx + vw > map_rect.x + map_rect.width) vx = map_rect.x + map_rect.width - vw;
+    if (vy + vh > map_rect.y + map_rect.height) vy = map_rect.y + map_rect.height - vh;
+    DrawRectangleLinesEx((Rectangle){vx, vy, vw, vh}, 2.0f, (Color){244, 196, 96, 255});
+
+    Vector2 center = minimap_world_to_screen(map_rect, world_min, world_max, dvec2(engine->camera.target_x, engine->camera.target_y));
+    center.x = clampf(center.x, map_rect.x, map_rect.x + map_rect.width);
+    center.y = clampf(center.y, map_rect.y, map_rect.y + map_rect.height);
+    DrawCircleV(center, 3.0f, (Color){244, 196, 96, 255});
+    DrawText("map", (int)map_rect.x + 8, (int)map_rect.y + 6, 12, (Color){206, 218, 235, 255});
 }
 
 Camera2D blueprint_camera_snapshot(const BlueprintEngine *engine) {
@@ -244,12 +364,17 @@ static void draw_debug_overlay(const BlueprintEngine *engine) {
 static void handle_camera_input(BlueprintEngine *engine) {
     Vector2 mouse = GetMousePosition();
     bool mouse_in_view = mouse.y >= engine->camera.top_bar_height;
+    bool mouse_in_minimap = CheckCollisionPointRec(mouse, minimap_rect(engine));
 
     if (IsKeyPressed(KEY_ONE)) engine->active_page = 0;
     if (IsKeyPressed(KEY_TWO)) engine->active_page = 1;
     if (IsKeyPressed(KEY_SPACE)) engine->paused = !engine->paused;
     if (IsKeyPressed(KEY_R)) blueprint_engine_reset(engine, GetScreenWidth(), GetScreenHeight());
     if (IsKeyPressed(KEY_Q)) engine->quit_requested = true;
+
+    if (engine->active_page == 0) {
+        handle_minimap_input(engine, mouse);
+    }
 
     double key_pan = 44.0 / engine->camera.zoom_goal;
     if (IsKeyDown(KEY_H)) engine->camera.target_goal_x -= key_pan;
@@ -277,7 +402,7 @@ static void handle_camera_input(BlueprintEngine *engine) {
         engine->camera.target_goal_y -= (double)delta.y / engine->camera.zoom_goal;
     }
 
-    if (mouse_in_view && IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+    if (mouse_in_view && !mouse_in_minimap && IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         Vector2 delta = GetMouseDelta();
         if (!CheckCollisionPointRec(mouse, (Rectangle){0, 0, (float)GetScreenWidth(), engine->camera.top_bar_height})) {
             engine->camera.target_goal_x -= (double)delta.x / engine->camera.zoom_goal;
@@ -518,7 +643,7 @@ static void draw_node_layer(BlueprintEngine *engine, BlueprintLayer layer) {
     Camera2D snapshot = blueprint_camera_snapshot(engine);
     for (size_t i = 0; i < engine->count; ++i) {
         BlueprintNode *node = &engine->nodes[i];
-        if (!node->visible || node->layer != layer || node->draw == NULL) {
+        if (!node->visible || node->layer != layer || node->draw == NULL || node->page != engine->active_page) {
             continue;
         }
         if (!blueprint_world_rect_visible(engine, node->bounds_min, node->bounds_max, 80.0 / engine->camera.zoom)) {
@@ -537,11 +662,12 @@ void blueprint_engine_draw(BlueprintEngine *engine) {
     ClearBackground((Color){8, 11, 16, 255});
     draw_top_bar(engine);
 
-    if (engine->active_page == 0) {
+    if (engine->active_page == 0 || engine->active_page == 1) {
         blueprint_draw_world_grid(engine);
         draw_node_layer(engine, BLUEPRINT_LAYER_GEOMETRY);
         draw_node_layer(engine, BLUEPRINT_LAYER_SIGNALS);
         draw_node_layer(engine, BLUEPRINT_LAYER_MATH);
+        draw_minimap(engine);
         draw_debug_overlay(engine);
     } else {
         DrawText("Page 2", 20, (int)engine->camera.top_bar_height + 20, 24, (Color){220, 225, 235, 255});
