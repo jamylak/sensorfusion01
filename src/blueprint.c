@@ -141,6 +141,7 @@ void blueprint_engine_shutdown(BlueprintEngine *engine) {
 void blueprint_engine_reset(BlueprintEngine *engine, int width, int height) {
     engine->active_page = 0;
     engine->paused = false;
+    engine->quit_requested = false;
     engine->time_seconds = 0.0;
     engine->signal_phase = 0.0;
     engine->camera.target_x = 0.0;
@@ -219,7 +220,7 @@ static void handle_camera_input(BlueprintEngine *engine) {
     if (IsKeyPressed(KEY_TWO)) engine->active_page = 1;
     if (IsKeyPressed(KEY_SPACE)) engine->paused = !engine->paused;
     if (IsKeyPressed(KEY_R)) blueprint_engine_reset(engine, GetScreenWidth(), GetScreenHeight());
-    if (IsKeyPressed(KEY_Q)) CloseWindow();
+    if (IsKeyPressed(KEY_Q)) engine->quit_requested = true;
 
     double key_pan = 44.0 / engine->camera.zoom_goal;
     if (IsKeyDown(KEY_H)) engine->camera.target_goal_x -= key_pan;

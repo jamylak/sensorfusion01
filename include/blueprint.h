@@ -49,6 +49,7 @@ typedef struct {
     BlueprintCamera camera;
     int active_page;
     bool paused;
+    bool quit_requested;
     double time_seconds;
     double signal_phase;
 } BlueprintEngine;

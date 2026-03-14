@@ -238,7 +238,7 @@ int main(void) {
     blueprint_engine_init(&engine, GetScreenWidth(), GetScreenHeight());
     blueprint_init_demo(&engine);
 
-    while (!WindowShouldClose()) {
+    while (!WindowShouldClose() && !engine.quit_requested) {
         blueprint_engine_update(&engine, GetFrameTime());
         blueprint_engine_draw(&engine);
     }
