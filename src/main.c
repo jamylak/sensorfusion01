@@ -1357,6 +1357,8 @@ static void draw_innovation_scene_node(Camera2D cam) {
     DVec2 projection_origin = dvec2(960.0, 760.0);
     DVec2 measurement_plane_origin = dvec2(1960.0, 780.0);
     DVec2 code_origin = dvec2(2280.0, 120.0);
+    DVec2 model_origin = dvec2(2860.0, 120.0);
+    DVec2 jacobian_origin = dvec2(3180.0, 420.0);
     double algebra_scale = 0.33;
     DVec2 ref = g_innovation_scene->projection_reference;
     DVec2 hx_vec = dvec2((g_innovation_scene->projected_measurement.data[0] - ref.x) * algebra_scale,
@@ -1364,6 +1366,28 @@ static void draw_innovation_scene_node(Camera2D cam) {
     DVec2 z_vec = dvec2((measured.x - ref.x) * algebra_scale,
                         (measured.y - ref.y) * algebra_scale);
     DVec2 y_vec = dvec2(innovation_tip.x * algebra_scale, innovation_tip.y * algebra_scale);
+    int active_dim = ((int)floor(engine->time_seconds * 1.1)) % 4;
+    double eps[4] = {60.0, 60.0, 28.0, 28.0};
+    DVec2 perturbed_measurements[4];
+    DVec2 measurement_slopes[4];
+    for (int i = 0; i < 4; ++i) {
+        double perturbed_state[4] = {
+            g_innovation_scene->state_vector.data[0],
+            g_innovation_scene->state_vector.data[1],
+            g_innovation_scene->state_vector.data[2],
+            g_innovation_scene->state_vector.data[3]
+        };
+        perturbed_state[i] += eps[i];
+        double mx = 0.0;
+        double my = 0.0;
+        for (int c = 0; c < 4; ++c) {
+            mx += matrix_get(&g_innovation_scene->measurement_model.H, 0, c) * perturbed_state[c];
+            my += matrix_get(&g_innovation_scene->measurement_model.H, 1, c) * perturbed_state[c];
+        }
+        perturbed_measurements[i] = dvec2(mx, my);
+        measurement_slopes[i] = dvec2((mx - g_innovation_scene->projected_measurement.data[0]) / eps[i],
+                                      (my - g_innovation_scene->projected_measurement.data[1]) / eps[i]);
+    }
 
     draw_world_axes(engine, algebra_origin, 210.0, (Color){92, 110, 134, 255});
     blueprint_draw_arrow(engine, algebra_origin, dvec2(algebra_origin.x + hx_vec.x, algebra_origin.y + hx_vec.y), 2.0f, (Color){120, 196, 255, 255});
@@ -1537,6 +1561,61 @@ static void draw_innovation_scene_node(Camera2D cam) {
                              "Dragging the sensor reading changes the physical observation and immediately changes the innovation geometry relative to the predicted covariance.");
     }
 
+    draw_world_axes(engine, model_origin, 210.0, (Color){96, 112, 136, 255});
+    draw_world_focus_ring(engine, dvec2(model_origin.x + g_innovation_scene->projected_measurement.data[0] * 0.18,
+                                        model_origin.y + g_innovation_scene->projected_measurement.data[1] * 0.18),
+                          innovation_measurement_color(active_dim < 2 ? active_dim : 0),
+                          10.0f);
+    blueprint_draw_arrow(engine,
+                         model_origin,
+                         dvec2(model_origin.x + g_innovation_scene->projected_measurement.data[0] * 0.18,
+                               model_origin.y + g_innovation_scene->projected_measurement.data[1] * 0.18),
+                         2.2f,
+                         (Color){120, 196, 255, 255});
+    for (int i = 0; i < 4; ++i) {
+        DVec2 perturbed_tip = dvec2(model_origin.x + perturbed_measurements[i].x * 0.18,
+                                    model_origin.y + perturbed_measurements[i].y * 0.18);
+        blueprint_draw_arrow(engine,
+                             dvec2(model_origin.x + g_innovation_scene->projected_measurement.data[0] * 0.18,
+                                   model_origin.y + g_innovation_scene->projected_measurement.data[1] * 0.18),
+                             perturbed_tip,
+                             i == active_dim ? 2.2f : 1.2f,
+                             i == active_dim ? innovation_state_color(i) : Fade(innovation_state_color(i), 0.6f));
+        draw_world_focus_ring(engine, perturbed_tip, i == active_dim ? innovation_state_color(i) : Fade(innovation_state_color(i), 0.7f), i == active_dim ? 11.0f : 7.0f);
+    }
+    blueprint_draw_tensor_flow_edge(engine, predicted, model_origin, (Color){120, 196, 255, 255}, "h(x)", true);
+    blueprint_draw_matrix_heatmap(engine, &g_innovation_scene->measurement_model.H, jacobian_origin, g_innovation_scene->cell_size, true,
+                                  active_dim < 2 ? active_dim : 0,
+                                  active_dim,
+                                  active_dim < 2 ? active_dim : 0,
+                                  active_dim,
+                                  "H = dh/dx");
+    for (int i = 0; i < 4; ++i) {
+        DVec2 slope_origin = dvec2(jacobian_origin.x - 220.0, jacobian_origin.y + i * 86.0 + 30.0);
+        blueprint_draw_arrow(engine,
+                             slope_origin,
+                             dvec2(slope_origin.x + measurement_slopes[i].x * 110.0,
+                                   slope_origin.y + measurement_slopes[i].y * 110.0),
+                             i == active_dim ? 2.0f : 1.0f,
+                             i == active_dim ? innovation_state_color(i) : Fade(innovation_state_color(i), 0.6f));
+    }
+    if (hover_world_rect(engine, dvec2(model_origin.x - 250.0, model_origin.y - 230.0), (Vector2){620.0f, 460.0f})) {
+        set_matrix_inspector(&inspector, "measurement function h(x)",
+                             "GPS sensor model in geometric form. The base point is h(x); each colored perturbation shows how a small change in one state dimension changes the sensor output.");
+        linked_state = active_dim;
+    }
+    if (hover_world_rect(engine, jacobian_origin, (Vector2){g_innovation_scene->cell_size * 4.0f, g_innovation_scene->cell_size * 2.0f})) {
+        set_matrix_inspector(&inspector, "Jacobian H = dh/dx",
+                             "Local measurement sensitivity. Each H entry is the slope of one measurement component with respect to one state component at the current state.");
+        linked_state = active_dim;
+        linked_measurement = active_dim < 2 ? active_dim : 0;
+    }
+    if (hover_screen_label(blueprint_world_to_screen(engine, dvec2(jacobian_origin.x, jacobian_origin.y - g_innovation_scene->cell_size * 0.8)), "H = dh/dx", 16)) {
+        set_matrix_inspector(&inspector, "where H comes from",
+                             "H is not arbitrary here. It emerges from the local derivatives of the measurement function h(x): how sensor output changes when the vehicle state is perturbed.");
+        linked_state = active_dim;
+    }
+
     if (linked_state == 0 || linked_state == 1) {
         draw_world_focus_ring(engine, predicted, innovation_state_color(linked_state), 13.0f);
         draw_world_focus_ring(engine, truth, innovation_state_color(linked_state), 13.0f);
@@ -1554,11 +1633,13 @@ static void draw_innovation_scene_node(Camera2D cam) {
         draw_world_focus_ring(engine, dvec2(measurement_plane_origin.x + hx_vec.x * 0.7, measurement_plane_origin.y + hx_vec.y * 0.7), innovation_measurement_color(0), 12.0f);
         draw_panel_link_box(engine, dvec2(projection_origin.x + 560.0, projection_origin.y + 60.0), (Vector2){g_innovation_scene->cell_size, g_innovation_scene->cell_size * 2.0f}, innovation_measurement_color(0), 2.2f);
         draw_panel_link_box(engine, code_origin, (Vector2){520.0f, 140.0f}, innovation_measurement_color(0), 2.0f);
+        draw_panel_link_box(engine, jacobian_origin, (Vector2){g_innovation_scene->cell_size * 4.0f, g_innovation_scene->cell_size * 2.0f}, innovation_measurement_color(0), 2.0f);
     } else if (linked_measurement == 1) {
         draw_world_focus_ring(engine, measured, innovation_measurement_color(1), 18.0f);
         draw_world_focus_ring(engine, dvec2(algebra_origin.x + z_vec.x, algebra_origin.y + z_vec.y), innovation_measurement_color(1), 12.0f);
         draw_world_focus_ring(engine, dvec2(measurement_plane_origin.x + z_vec.x * 0.7, measurement_plane_origin.y + z_vec.y * 0.7), innovation_measurement_color(1), 12.0f);
         draw_panel_link_box(engine, code_origin, (Vector2){520.0f, 140.0f}, innovation_measurement_color(1), 2.0f);
+        draw_panel_link_box(engine, jacobian_origin, (Vector2){g_innovation_scene->cell_size * 4.0f, g_innovation_scene->cell_size * 2.0f}, innovation_measurement_color(1), 2.0f);
     }
     if (linked_state >= 0 && linked_measurement >= 0) {
         DVec2 x_cell = dvec2(projection_origin.x + g_innovation_scene->cell_size * 0.5,
@@ -1571,6 +1652,13 @@ static void draw_innovation_scene_node(Camera2D cam) {
         blueprint_draw_signal_arrow(engine, x_cell, h_cell, 1.6f, link_color, 0.12);
         blueprint_draw_signal_arrow(engine, h_cell, hx_cell, 1.6f, link_color, 0.24);
         draw_panel_link_box(engine, code_origin, (Vector2){520.0f, 140.0f}, link_color, 2.0f);
+        blueprint_draw_signal_arrow(engine, dvec2(model_origin.x + g_innovation_scene->projected_measurement.data[0] * 0.18,
+                                                  model_origin.y + g_innovation_scene->projected_measurement.data[1] * 0.18),
+                                    dvec2(jacobian_origin.x + linked_state * g_innovation_scene->cell_size + g_innovation_scene->cell_size * 0.5,
+                                          jacobian_origin.y + linked_measurement * g_innovation_scene->cell_size + g_innovation_scene->cell_size * 0.5),
+                                    1.5f,
+                                    link_color,
+                                    0.32);
     }
 
     draw_matrix_inspector_box(&inspector);
@@ -3274,7 +3362,7 @@ static InnovationSceneData *create_innovation_scene(void) {
         return NULL;
     }
     scene->scene_min = dvec2(-1800.0, -760.0);
-    scene->scene_max = dvec2(2500.0, 1400.0);
+    scene->scene_max = dvec2(3800.0, 1600.0);
     initialize_innovation_scene(scene);
     return scene;
 }
