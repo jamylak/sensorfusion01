@@ -1356,6 +1356,7 @@ static void draw_innovation_scene_node(Camera2D cam) {
     DVec2 innovation_origin = dvec2(1760.0, -40.0);
     DVec2 projection_origin = dvec2(960.0, 760.0);
     DVec2 measurement_plane_origin = dvec2(1960.0, 780.0);
+    DVec2 code_origin = dvec2(2280.0, 120.0);
     double algebra_scale = 0.33;
     DVec2 ref = g_innovation_scene->projection_reference;
     DVec2 hx_vec = dvec2((g_innovation_scene->projected_measurement.data[0] - ref.x) * algebra_scale,
@@ -1399,6 +1400,48 @@ static void draw_innovation_scene_node(Camera2D cam) {
     if (hover_screen_label((Vector2){inv.x + 10.0f, inv.y - 14.0f}, "y", 14)) {
         set_matrix_inspector(&inspector, "y",
                              "Innovation vector by itself. This is the part of the Kalman pipeline that says how wrong the filter's sensor prediction was.");
+    }
+
+    {
+        static const char *code_lines[] = {
+            "Vec4 state = {px, py, vx, vy};",
+            "Mat2x4 H = {{1,0,0,0},{0,1,0,0}};",
+            "Vec2 predicted = H * state;",
+            "Vec2 measurement = z;",
+            "Vec2 innovation = measurement - predicted;"
+        };
+        int active_line = 4;
+        Color code_color = (Color){255, 236, 170, 255};
+        if (linked_state >= 0) {
+            active_line = linked_state <= 1 ? 0 : 0;
+            code_color = innovation_state_color(linked_state);
+        }
+        if (linked_measurement == 0) {
+            active_line = 2;
+            code_color = innovation_measurement_color(0);
+        } else if (linked_measurement == 1) {
+            active_line = 3;
+            code_color = innovation_measurement_color(1);
+        }
+        Vector2 code_anchor = blueprint_world_to_screen(engine, code_origin);
+        for (int i = 0; i < 5; ++i) {
+            if (i == active_line) {
+                DrawRectangle((int)code_anchor.x - 8, (int)code_anchor.y + i * 24 - 2, MeasureText(code_lines[i], 17) + 16, 22, Fade(code_color, 0.22f));
+            }
+            DrawText(code_lines[i], (int)code_anchor.x, (int)code_anchor.y + i * 24, 17, i == active_line ? color_lerp(code_color, WHITE, 0.18f) : (Color){188, 202, 220, 255});
+        }
+        if (hover_world_rect(engine, code_origin, (Vector2){520.0f, 140.0f})) {
+            set_matrix_inspector(&inspector, "innovation code path",
+                                 "The same physical chain as the rest of page 3: vehicle state projected through H into predicted measurement, then compared against the sensor measurement z to produce innovation y.");
+        }
+        if (hover_screen_label((Vector2){code_anchor.x, code_anchor.y + active_line * 24.0f}, code_lines[active_line], 17)) {
+            set_matrix_inspector(&inspector, "active code line",
+                                 active_line == 0 ? "Loads the physical vehicle estimate into the state vector used by the filter." :
+                                 active_line == 1 ? "Defines the observation model that tells the sensor which physical quantities it can see." :
+                                 active_line == 2 ? "Computes predicted measurement Hx from the current vehicle estimate." :
+                                 active_line == 3 ? "Uses the actual sensor observation z from the same vehicle." :
+                                                    "Subtracts prediction from observation to form the innovation.");
+        }
     }
 
     if (hover_matrix_cell_world(engine, projection_origin, g_innovation_scene->state_vector.size, 1, g_innovation_scene->cell_size, &hover_row, &hover_col)) {
@@ -1510,10 +1553,12 @@ static void draw_innovation_scene_node(Camera2D cam) {
         draw_world_focus_ring(engine, dvec2(algebra_origin.x + hx_vec.x, algebra_origin.y + hx_vec.y), innovation_measurement_color(0), 12.0f);
         draw_world_focus_ring(engine, dvec2(measurement_plane_origin.x + hx_vec.x * 0.7, measurement_plane_origin.y + hx_vec.y * 0.7), innovation_measurement_color(0), 12.0f);
         draw_panel_link_box(engine, dvec2(projection_origin.x + 560.0, projection_origin.y + 60.0), (Vector2){g_innovation_scene->cell_size, g_innovation_scene->cell_size * 2.0f}, innovation_measurement_color(0), 2.2f);
+        draw_panel_link_box(engine, code_origin, (Vector2){520.0f, 140.0f}, innovation_measurement_color(0), 2.0f);
     } else if (linked_measurement == 1) {
         draw_world_focus_ring(engine, measured, innovation_measurement_color(1), 18.0f);
         draw_world_focus_ring(engine, dvec2(algebra_origin.x + z_vec.x, algebra_origin.y + z_vec.y), innovation_measurement_color(1), 12.0f);
         draw_world_focus_ring(engine, dvec2(measurement_plane_origin.x + z_vec.x * 0.7, measurement_plane_origin.y + z_vec.y * 0.7), innovation_measurement_color(1), 12.0f);
+        draw_panel_link_box(engine, code_origin, (Vector2){520.0f, 140.0f}, innovation_measurement_color(1), 2.0f);
     }
     if (linked_state >= 0 && linked_measurement >= 0) {
         DVec2 x_cell = dvec2(projection_origin.x + g_innovation_scene->cell_size * 0.5,
@@ -1525,6 +1570,7 @@ static void draw_innovation_scene_node(Camera2D cam) {
         Color link_color = color_lerp(innovation_state_color(linked_state), innovation_measurement_color(linked_measurement), 0.5f);
         blueprint_draw_signal_arrow(engine, x_cell, h_cell, 1.6f, link_color, 0.12);
         blueprint_draw_signal_arrow(engine, h_cell, hx_cell, 1.6f, link_color, 0.24);
+        draw_panel_link_box(engine, code_origin, (Vector2){520.0f, 140.0f}, link_color, 2.0f);
     }
 
     draw_matrix_inspector_box(&inspector);
