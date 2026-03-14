@@ -758,6 +758,155 @@ static void draw_velocity_arrow(const BlueprintEngine *engine, const GaussianSta
     }
 }
 
+typedef struct {
+    bool active;
+    bool cell_active;
+    int row;
+    int col;
+    int timeline_index;
+    char title[64];
+    char body[320];
+    Vector2 screen_anchor;
+} MatrixInspector;
+
+static const char *state_axis_label(int index) {
+    static const char *labels[] = {"x", "y", "vx", "vy", "theta"};
+    if (index < 0 || index >= (int)(sizeof(labels) / sizeof(labels[0]))) {
+        return "?";
+    }
+    return labels[index];
+}
+
+static bool hover_matrix_cell_world(const BlueprintEngine *engine, DVec2 origin, int rows, int cols, float cell_size, int *out_row, int *out_col) {
+    DVec2 mouse = blueprint_screen_to_world(engine, GetMousePosition());
+    if (mouse.x < origin.x || mouse.y < origin.y ||
+        mouse.x >= origin.x + cols * cell_size || mouse.y >= origin.y + rows * cell_size) {
+        return false;
+    }
+    *out_col = (int)((mouse.x - origin.x) / cell_size);
+    *out_row = (int)((mouse.y - origin.y) / cell_size);
+    return *out_row >= 0 && *out_row < rows && *out_col >= 0 && *out_col < cols;
+}
+
+static bool hover_matrix_title_screen(const BlueprintEngine *engine, DVec2 origin, float cell_size, const char *title) {
+    if (title == NULL) {
+        return false;
+    }
+    Vector2 anchor = blueprint_world_to_screen(engine, dvec2(origin.x, origin.y - cell_size * 0.8));
+    int width = MeasureText(title, 16);
+    Rectangle rect = {anchor.x - 4.0f, anchor.y - 2.0f, (float)width + 8.0f, 20.0f};
+    return CheckCollisionPointRec(GetMousePosition(), rect);
+}
+
+static void set_matrix_inspector(MatrixInspector *inspector, const char *title, const char *body) {
+    if (inspector == NULL || inspector->active) {
+        return;
+    }
+    inspector->active = true;
+    inspector->screen_anchor = GetMousePosition();
+    strncpy(inspector->title, title, sizeof(inspector->title) - 1);
+    strncpy(inspector->body, body, sizeof(inspector->body) - 1);
+}
+
+static void draw_matrix_inspector_box(const MatrixInspector *inspector) {
+    if (inspector == NULL || !inspector->active) {
+        return;
+    }
+    int title_w = MeasureText(inspector->title, 15);
+    int body_w = MeasureText(inspector->body, 13);
+    int width = title_w > body_w ? title_w : body_w;
+    width += 20;
+    int x = (int)inspector->screen_anchor.x + 18;
+    int y = (int)inspector->screen_anchor.y + 18;
+    DrawRectangle(x, y, width, 46, Fade((Color){10, 14, 20, 255}, 0.96f));
+    DrawRectangleLines(x, y, width, 46, (Color){108, 126, 150, 255});
+    DrawText(inspector->title, x + 8, y + 6, 15, (Color){236, 242, 249, 255});
+    DrawText(inspector->body, x + 8, y + 24, 13, (Color){188, 202, 220, 255});
+}
+
+static void draw_fusion_matrix_panel(const BlueprintEngine *engine, const Matrix *matrix, DVec2 origin, float cell_size, const char *title, MatrixInspector *inspector, int selected_row, int selected_col, bool *out_hovered_cell, int *out_row, int *out_col) {
+    int hover_row = -1;
+    int hover_col = -1;
+    bool cell_hover = hover_matrix_cell_world(engine, origin, matrix->rows, matrix->cols, cell_size, &hover_row, &hover_col);
+    if (out_hovered_cell != NULL) *out_hovered_cell = cell_hover;
+    if (out_row != NULL) *out_row = hover_row;
+    if (out_col != NULL) *out_col = hover_col;
+
+    if (hover_matrix_title_screen(engine, origin, cell_size, title)) {
+        char body[320];
+        if (strcmp(title, "F") == 0) {
+            snprintf(body, sizeof(body), "State transition Jacobian. Each cell maps how one state component influences another during prediction.");
+        } else if (strcmp(title, "Q") == 0) {
+            snprintf(body, sizeof(body), "Process noise covariance. Each entry models injected uncertainty between propagated state dimensions.");
+        } else {
+            snprintf(body, sizeof(body), "Matrix panel for %s.", title);
+        }
+        set_matrix_inspector(inspector, title, body);
+    }
+
+    if (cell_hover) {
+        char body[320];
+        snprintf(body, sizeof(body), "%s[%s,%s] = %.3f", title, state_axis_label(hover_row), state_axis_label(hover_col), matrix_get(matrix, hover_row, hover_col));
+        if (strcmp(title, "F") == 0) {
+            snprintf(body, sizeof(body), "F[%s,%s] = %.3f. Prediction coupling from %s into %s.", state_axis_label(hover_row), state_axis_label(hover_col), matrix_get(matrix, hover_row, hover_col), state_axis_label(hover_col), state_axis_label(hover_row));
+        } else if (strcmp(title, "Q") == 0) {
+            snprintf(body, sizeof(body), "Q[%s,%s] = %.3f. Process noise covariance between %s and %s.", state_axis_label(hover_row), state_axis_label(hover_col), matrix_get(matrix, hover_row, hover_col), state_axis_label(hover_row), state_axis_label(hover_col));
+        }
+        set_matrix_inspector(inspector, title, body);
+    }
+
+    blueprint_draw_matrix_heatmap(engine, matrix, origin, cell_size, true,
+                                  selected_row, selected_col,
+                                  cell_hover ? hover_row : selected_row,
+                                  cell_hover ? hover_col : selected_col,
+                                  title);
+}
+
+static void draw_interactive_covariance_timeline(const BlueprintEngine *engine, const Matrix *history, int history_count, int matrix_dim, DVec2 origin, float cell_size, MatrixInspector *inspector, int selected_row, int selected_col, bool *out_hovered_cell, int *out_row, int *out_col) {
+    bool any_hover = false;
+    int hover_row = -1;
+    int hover_col = -1;
+    int hover_index = -1;
+    Vector2 title_anchor = blueprint_world_to_screen(engine, dvec2(origin.x, origin.y - cell_size * 2.4));
+    if (CheckCollisionPointRec(GetMousePosition(), (Rectangle){title_anchor.x - 4.0f, title_anchor.y - 2.0f, (float)MeasureText("covariance evolution", 15) + 8.0f, 20.0f})) {
+        set_matrix_inspector(inspector, "P[...]",
+                             "Covariance history. Each P[k] stores uncertainty coupling between state dimensions over time.");
+    }
+    DrawText("covariance evolution", (int)title_anchor.x, (int)title_anchor.y, 15, (Color){232, 238, 246, 255});
+
+    for (int i = 0; i < history_count; ++i) {
+        DVec2 panel_origin = dvec2(origin.x + i * (matrix_dim * cell_size + cell_size * 0.8), origin.y);
+        char label[32];
+        snprintf(label, sizeof(label), "P[%d]", i);
+        int local_row = -1;
+        int local_col = -1;
+        bool local_hover = hover_matrix_cell_world(engine, panel_origin, matrix_dim, matrix_dim, cell_size, &local_row, &local_col);
+        if (hover_matrix_title_screen(engine, panel_origin, cell_size, label)) {
+            char body[320];
+            snprintf(body, sizeof(body), "P[%d] is the covariance snapshot at timeline step %d.", i, i);
+            set_matrix_inspector(inspector, label, body);
+        }
+        if (local_hover) {
+            any_hover = true;
+            hover_row = local_row;
+            hover_col = local_col;
+            hover_index = i;
+            char body[320];
+            snprintf(body, sizeof(body), "P[%d][%s,%s] = %.3f. Uncertainty coupling at timeline step %d.", i, state_axis_label(local_row), state_axis_label(local_col), matrix_get(&history[i], local_row, local_col), i);
+            set_matrix_inspector(inspector, label, body);
+        }
+        blueprint_draw_matrix_heatmap(engine, &history[i], panel_origin, cell_size, false,
+                                      selected_row, selected_col,
+                                      local_hover ? local_row : selected_row,
+                                      local_hover ? local_col : selected_col,
+                                      label);
+    }
+    if (out_hovered_cell != NULL) *out_hovered_cell = any_hover;
+    if (out_row != NULL) *out_row = hover_row;
+    if (out_col != NULL) *out_col = hover_col;
+    if (inspector != NULL) inspector->timeline_index = hover_index;
+}
+
 static void debugger_execute_current_step(FusionSceneData *scene) {
     if (scene == NULL || scene->debugger.step_count == 0) return;
     AlgorithmStep *step = &scene->debugger.steps[scene->debugger.current_step];
@@ -807,6 +956,12 @@ static void draw_fusion_scene_node(Camera2D cam) {
     DVec2 gps_meas = dvec2(g_fusion_scene->gps_measurement.lat, g_fusion_scene->gps_measurement.lon);
     DVec2 fused = dvec2(g_fusion_scene->fused_state.mean.data[0], g_fusion_scene->fused_state.mean.data[1]);
     DVec2 gps_corrected = dvec2(g_fusion_scene->gps_corrected_state.mean.data[0], g_fusion_scene->gps_corrected_state.mean.data[1]);
+    MatrixInspector matrix_inspector = {0};
+    int linked_row = -1;
+    int linked_col = -1;
+    bool hovered_cell = false;
+    int hover_row = -1;
+    int hover_col = -1;
 
     blueprint_draw_state_trajectory(engine, g_fusion_scene->true_path, g_fusion_scene->path_count, (Color){90, 110, 138, 200});
     blueprint_draw_state_trajectory(engine, g_fusion_scene->predicted_path, g_fusion_scene->path_count, (Color){120, 196, 255, 180});
@@ -840,8 +995,16 @@ static void draw_fusion_scene_node(Camera2D cam) {
     blueprint_draw_tensor_flow_edge(engine, gps_corrected, dvec2(camera_node_center.x - 132.0, camera_node_center.y + 28.0), (Color){196, 132, 255, 255}, "prior", fusion_node_active(engine, 2));
     blueprint_draw_tensor_flow_edge(engine, dvec2(camera_node_center.x + 132.0, camera_node_center.y), fused, (Color){196, 132, 255, 255}, "central estimate", fusion_node_active(engine, 2));
 
-    blueprint_draw_matrix_heatmap(engine, &g_fusion_scene->transition_matrix_view, dvec2(-1280.0, 420.0), g_fusion_scene->cell_size, true, -1, -1, -1, -1, "F");
-    blueprint_draw_matrix_heatmap(engine, &g_fusion_scene->imu_process_view, dvec2(-760.0, 420.0), g_fusion_scene->cell_size, true, -1, -1, -1, -1, "Q");
+    draw_fusion_matrix_panel(engine, &g_fusion_scene->transition_matrix_view, dvec2(-1280.0, 420.0), g_fusion_scene->cell_size, "F", &matrix_inspector, linked_row, linked_col, &hovered_cell, &hover_row, &hover_col);
+    if (hovered_cell) {
+        linked_row = hover_row;
+        linked_col = hover_col;
+    }
+    draw_fusion_matrix_panel(engine, &g_fusion_scene->imu_process_view, dvec2(-760.0, 420.0), g_fusion_scene->cell_size, "Q", &matrix_inspector, linked_row, linked_col, &hovered_cell, &hover_row, &hover_col);
+    if (hovered_cell) {
+        linked_row = hover_row;
+        linked_col = hover_col;
+    }
     blueprint_draw_sensor_model_box(engine, &g_fusion_scene->gps_sensor, dvec2(-220.0, 420.0), g_fusion_scene->cell_size, "GPS sensor");
     blueprint_draw_sensor_model_box(engine, &g_fusion_scene->camera_sensor, dvec2(340.0, 420.0), g_fusion_scene->cell_size, "Camera sensor");
     blueprint_draw_kalman_gain_heatmap(engine, &g_fusion_scene->gps_internals, dvec2(900.0, 420.0), g_fusion_scene->cell_size, "K_gps");
@@ -850,13 +1013,22 @@ static void draw_fusion_scene_node(Camera2D cam) {
     blueprint_draw_vector_visual(engine, &g_fusion_scene->camera_internals.innovation, dvec2(1180.0, 120.0), g_fusion_scene->cell_size * 0.9f, true, "camera innovation", (Color){196, 132, 255, 255});
     blueprint_draw_matrix_heatmap(engine, &g_fusion_scene->gps_residual.S, dvec2(620.0, 120.0), g_fusion_scene->cell_size, true, -1, -1, -1, -1, "S_gps");
     blueprint_draw_matrix_heatmap(engine, &g_fusion_scene->camera_residual.S, dvec2(620.0, 420.0), g_fusion_scene->cell_size, true, -1, -1, -1, -1, "S_cam");
-    blueprint_draw_covariance_timeline(engine, g_fusion_scene->covariance_history, g_fusion_scene->covariance_history_count, 5, dvec2(-1320.0, 760.0), 18.0f, "covariance evolution");
+    draw_interactive_covariance_timeline(engine, g_fusion_scene->covariance_history, g_fusion_scene->covariance_history_count, 5, dvec2(-1320.0, 860.0), 18.0f, &matrix_inspector, linked_row, linked_col, &hovered_cell, &hover_row, &hover_col);
+    if (hovered_cell) {
+        linked_row = hover_row;
+        linked_col = hover_col;
+    }
+    if (linked_row >= 0 && linked_col >= 0) {
+        blueprint_draw_matrix_heatmap(engine, &g_fusion_scene->transition_matrix_view, dvec2(-1280.0, 420.0), g_fusion_scene->cell_size, true, linked_row, linked_col, linked_row, linked_col, "F");
+        blueprint_draw_matrix_heatmap(engine, &g_fusion_scene->imu_process_view, dvec2(-760.0, 420.0), g_fusion_scene->cell_size, true, linked_row, linked_col, linked_row, linked_col, "Q");
+    }
     blueprint_draw_innovation_statistics(engine, g_fusion_scene->gps_innovation_history, g_fusion_scene->gps_innovation_count, dvec2(180.0, -520.0), (Vector2){420.0f, 180.0f}, (Color){248, 176, 102, 255}, "gps innovation stats");
     blueprint_draw_innovation_statistics(engine, g_fusion_scene->camera_innovation_history, g_fusion_scene->camera_innovation_count, dvec2(660.0, -520.0), (Vector2){420.0f, 180.0f}, (Color){196, 132, 255, 255}, "camera innovation stats");
     blueprint_draw_sensor_timing_lanes(engine, g_fusion_scene->imu_event_times, g_fusion_scene->imu_event_count, g_fusion_scene->camera_event_times, g_fusion_scene->camera_event_count, g_fusion_scene->gps_event_times, g_fusion_scene->gps_event_count, engine->time_seconds, dvec2(-1320.0, -520.0), (Vector2){420.0f, 180.0f}, "sensor timing");
     blueprint_draw_large_factor_graph(engine, &g_fusion_scene->factor_graph, g_fusion_scene->vehicle_tracks, g_fusion_scene->vehicle_track_count, "distributed factor graph");
     blueprint_draw_execution_timeline(engine, &g_fusion_scene->debugger, dvec2(180.0, -300.0), (Vector2){900.0f, 210.0f}, "algorithm execution");
     debugger_draw_overlay();
+    draw_matrix_inspector_box(&matrix_inspector);
 
     const char *lines[] = {
         "n/b step, p run-pause, u/o scrub history; the debugger exposes one atomic Kalman operation at a time",
