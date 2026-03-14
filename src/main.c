@@ -121,12 +121,29 @@ typedef struct {
     float cell_size;
 } FusionSceneData;
 
+typedef struct MatrixInspector {
+    bool active;
+    bool cell_active;
+    int row;
+    int col;
+    int timeline_index;
+    char title[64];
+    char body[320];
+    Vector2 screen_anchor;
+} MatrixInspector;
+
 static MathSceneData *g_math_scene = NULL;
 static FusionSceneData *g_fusion_scene = NULL;
 
 static void destroy_math_scene(MathSceneData *scene);
 static void destroy_fusion_scene(FusionSceneData *scene);
 static void append_factor_graph_samples(FusionSceneData *scene, double t);
+static bool hover_world_rect_screen(const BlueprintEngine *engine, DVec2 origin, Vector2 size);
+static void set_matrix_inspector(MatrixInspector *inspector, const char *title, const char *body);
+static void draw_matrix_inspector_box(const MatrixInspector *inspector);
+static void draw_math_matrix_panel(const BlueprintEngine *engine, const Matrix *matrix, DVec2 origin, float cell_size, const char *title, const char *description, MatrixInspector *inspector, int selected_row, int selected_col, int focus_row, int focus_col, bool *out_hovered, int *out_row, int *out_col);
+static void draw_math_vector_panel(const BlueprintEngine *engine, const Vector *vector, DVec2 origin, float cell_size, const char *title, Color accent, const char *description, MatrixInspector *inspector, int selected_index, bool *out_hovered, int *out_index);
+static void maybe_describe_math_node(const BlueprintEngine *engine, const MathNode *node, Vector2 size, const char *description, MatrixInspector *inspector);
 static void debugger_step_prediction(void);
 static void debugger_step_innovation(void);
 static void debugger_step_s_matrix(void);
@@ -594,26 +611,122 @@ static void draw_math_scene_node(Camera2D cam) {
     const BlueprintEngine *engine = blueprint_active_engine();
     if (engine == NULL || g_math_scene == NULL) return;
     init_math_scene_compute(g_math_scene);
+    MatrixInspector inspector = {0};
+    DVec2 origin_a = dvec2(g_math_scene->heatmap_a.world_position.x, g_math_scene->heatmap_a.world_position.y);
+    DVec2 origin_b = dvec2(g_math_scene->heatmap_b.world_position.x, g_math_scene->heatmap_b.world_position.y);
+    DVec2 origin_c = dvec2(g_math_scene->heatmap_c.world_position.x, g_math_scene->heatmap_c.world_position.y);
+    DVec2 origin_at = dvec2(560.0, -360.0);
+    DVec2 origin_p = dvec2(-1120.0, 300.0);
+    DVec2 origin_pinv = dvec2(-650.0, 300.0);
+    DVec2 origin_f = dvec2(-80.0, 300.0);
+    DVec2 origin_x = dvec2(300.0, 270.0);
+    DVec2 origin_fx = dvec2(780.0, 270.0);
+    DVec2 origin_pp = dvec2(360.0, 640.0);
+    int selected_row = -1;
+    int selected_col = -1;
+    int transpose_row = -1;
+    int transpose_col = -1;
+    int selected_vector_index = -1;
+    bool hovered = false;
+    int hover_row = -1;
+    int hover_col = -1;
+    int hover_index = -1;
+
     blueprint_draw_matrix_multiply_visualizer(engine, g_math_scene->a, g_math_scene->b, g_math_scene->c,
-                                              dvec2(g_math_scene->heatmap_a.world_position.x, g_math_scene->heatmap_a.world_position.y),
-                                              dvec2(g_math_scene->heatmap_b.world_position.x, g_math_scene->heatmap_b.world_position.y),
-                                              dvec2(g_math_scene->heatmap_c.world_position.x, g_math_scene->heatmap_c.world_position.y),
+                                              origin_a, origin_b, origin_c,
                                               g_math_scene->cell_size, engine->time_seconds);
-    blueprint_draw_matrix_heatmap(engine, g_math_scene->a_transpose, dvec2(560.0, -360.0), g_math_scene->cell_size, true, -1, -1, -1, -1, "A^T");
-    blueprint_draw_covariance_matrix_visual(engine, g_math_scene->covariance, dvec2(-1120.0, 300.0), dvec2(-900.0, 460.0), g_math_scene->cell_size, "P");
-    blueprint_draw_matrix_heatmap(engine, g_math_scene->covariance_inverse, dvec2(-650.0, 300.0), g_math_scene->cell_size, true, -1, -1, -1, -1, "P^-1");
-    blueprint_draw_matrix_heatmap(engine, g_math_scene->transition, dvec2(-80.0, 300.0), g_math_scene->cell_size, true, -1, -1, -1, -1, "F");
-    blueprint_draw_vector_visual(engine, g_math_scene->state_vector, dvec2(300.0, 270.0), g_math_scene->vector_cell_size, true, "x", (Color){124, 228, 196, 255});
-    blueprint_draw_vector_visual(engine, g_math_scene->transformed_vector, dvec2(780.0, 270.0), g_math_scene->vector_cell_size, true, "Fx", (Color){246, 168, 96, 255});
-    blueprint_draw_covariance_matrix_visual(engine, g_math_scene->propagated_covariance, dvec2(360.0, 640.0), dvec2(590.0, 800.0), g_math_scene->cell_size, "P'");
+
+    draw_math_matrix_panel(engine, g_math_scene->a, origin_a, g_math_scene->cell_size, "A",
+                           "Left multiplicand. In practice this stands in for a measurement or feature matrix whose rows are consumed during update equations.",
+                           &inspector, -1, -1, -1, -1, &hovered, &hover_row, &hover_col);
+    if (hovered) {
+        selected_row = hover_row;
+        selected_col = hover_col;
+        transpose_row = hover_col;
+        transpose_col = hover_row;
+    }
+    draw_math_matrix_panel(engine, g_math_scene->b, origin_b, g_math_scene->cell_size, "B",
+                           "Right multiplicand. In practice this stands in for state, feature, or Jacobian columns combined with A during update and projection steps.",
+                           &inspector, -1, -1, -1, -1, &hovered, &hover_row, &hover_col);
+    if (hovered) {
+        selected_row = hover_row;
+        selected_col = hover_col;
+    }
+    draw_math_matrix_panel(engine, g_math_scene->c, origin_c, g_math_scene->cell_size, "C = A x B",
+                           "Product matrix. This is the same primitive used to build predicted measurements, innovation covariance terms, and graph normal-equation blocks.",
+                           &inspector, selected_row, selected_col, selected_row, selected_col, &hovered, &hover_row, &hover_col);
+    if (hovered) {
+        selected_row = hover_row;
+        selected_col = hover_col;
+    }
+    draw_math_matrix_panel(engine, g_math_scene->a_transpose, origin_at, g_math_scene->cell_size, "A^T",
+                           "Transpose of A. Real filters use this constantly in H^T, F^T, and information-form updates.",
+                           &inspector, transpose_row, transpose_col, transpose_row, transpose_col, &hovered, &hover_row, &hover_col);
+    if (hovered) {
+        transpose_row = hover_row;
+        transpose_col = hover_col;
+        selected_row = hover_col;
+        selected_col = hover_row;
+    }
+
+    draw_math_matrix_panel(engine, g_math_scene->covariance, origin_p, g_math_scene->cell_size, "P",
+                           "Covariance matrix. This is the estimator uncertainty engineers inspect to see position, velocity, and heading confidence and coupling.",
+                           &inspector, selected_row, selected_col, selected_row, selected_col, &hovered, &hover_row, &hover_col);
+    blueprint_draw_covariance_matrix_visual(engine, g_math_scene->covariance, origin_p, dvec2(-900.0, 460.0), g_math_scene->cell_size, "P");
+    if (hovered) {
+        selected_row = hover_row;
+        selected_col = hover_col;
+    }
+    draw_math_matrix_panel(engine, g_math_scene->covariance_inverse, origin_pinv, g_math_scene->cell_size, "P^-1",
+                           "Precision matrix. In SLAM and factor graphs this is the information weighting that says which directions are trusted more strongly.",
+                           &inspector, selected_row, selected_col, selected_row, selected_col, &hovered, &hover_row, &hover_col);
+    if (hovered) {
+        selected_row = hover_row;
+        selected_col = hover_col;
+    }
+    draw_math_matrix_panel(engine, g_math_scene->transition, origin_f, g_math_scene->cell_size, "F",
+                           "Linear transition operator. In a real IMU/GPS/vision filter this is the prediction Jacobian that pushes state and covariance forward in time.",
+                           &inspector, selected_row, selected_col, selected_row, selected_col, &hovered, &hover_row, &hover_col);
+    if (hovered) {
+        selected_row = hover_row;
+        selected_col = hover_col;
+    }
+    draw_math_vector_panel(engine, g_math_scene->state_vector, origin_x, g_math_scene->vector_cell_size, "x", (Color){124, 228, 196, 255},
+                           "Input state vector. Think robot pose, velocity, and orientation before prediction or correction.", &inspector, selected_vector_index, &hovered, &hover_index);
+    if (hovered) {
+        selected_vector_index = hover_index;
+    }
+    draw_math_vector_panel(engine, g_math_scene->transformed_vector, origin_fx, g_math_scene->vector_cell_size, "Fx", (Color){246, 168, 96, 255},
+                           "Predicted state vector after the motion model. This is what later gets compared against sensor measurements.", &inspector, selected_vector_index, &hovered, &hover_index);
+    if (hovered) {
+        selected_vector_index = hover_index;
+    }
+    draw_math_matrix_panel(engine, g_math_scene->propagated_covariance, origin_pp, g_math_scene->cell_size, "P'",
+                           "Propagated covariance after applying F P F^T. This is the uncertainty ellipse engineers expect to grow or shear after prediction.",
+                           &inspector, selected_row, selected_col, selected_row, selected_col, &hovered, &hover_row, &hover_col);
+    blueprint_draw_covariance_matrix_visual(engine, g_math_scene->propagated_covariance, origin_pp, dvec2(590.0, 800.0), g_math_scene->cell_size, "P'");
+    if (hovered) {
+        selected_row = hover_row;
+        selected_col = hover_col;
+    }
+
     for (int i = 0; i < g_math_scene->node_count; ++i) g_math_scene->nodes[i].draw(&g_math_scene->nodes[i]);
+    maybe_describe_math_node(engine, &g_math_scene->nodes[0], (Vector2){170.0f, 92.0f}, "Real purpose: the atomic multiply used in Kalman updates, feature projection, and factor-graph assembly.", &inspector);
+    maybe_describe_math_node(engine, &g_math_scene->nodes[1], (Vector2){150.0f, 84.0f}, "Real purpose: transposes needed for H^T, F^T, and every covariance/information update path.", &inspector);
+    maybe_describe_math_node(engine, &g_math_scene->nodes[2], (Vector2){150.0f, 84.0f}, "Real purpose: converts covariance into information weighting for gating, graph optimization, and confidence reasoning.", &inspector);
+    maybe_describe_math_node(engine, &g_math_scene->nodes[3], (Vector2){164.0f, 84.0f}, "Real purpose: state prediction from the motion model before any GPS, camera, or other sensor correction arrives.", &inspector);
+    maybe_describe_math_node(engine, &g_math_scene->nodes[4], (Vector2){180.0f, 88.0f}, "Real purpose: uncertainty propagation so engineers can inspect how motion makes confidence grow, rotate, or couple.", &inspector);
     draw_math_graph(engine, g_math_scene);
     const char *lines[] = {
-        "Explicit matrix/tensor graph for estimation and control pipelines",
-        "Every matrix is rendered as a full grid; no icon substitution",
-        "MathNode chain: multiply, transpose, inverse, vector transform, covariance propagation"
+        "Page 1 is the low-level math under page 2's IMU, GPS, camera, and factor-graph estimation pipeline",
+        "Each block is a real estimator primitive: prediction Jacobians, state projection, covariance propagation, and information weighting",
+        "Use this page to inspect the exact matrix/vector mechanics that later appear as sensors, gains, residuals, and uncertainty on page 2"
     };
     blueprint_draw_equation_block(engine, dvec2(-1220.0, -560.0), "linear algebra layer", lines, 3, (Color){235, 242, 249, 255});
+    if (hover_world_rect_screen(engine, dvec2(-1220.0, -560.0), (Vector2){640.0f, 120.0f})) {
+        set_matrix_inspector(&inspector, "linear algebra layer", "Practical purpose: this page decomposes the exact algebra behind robotics state estimation so you can inspect how sensors, motion models, and uncertainty updates are actually computed.");
+    }
+    draw_matrix_inspector_box(&inspector);
 }
 
 static void initialize_fusion_scene(FusionSceneData *scene) {
@@ -757,17 +870,6 @@ static void draw_velocity_arrow(const BlueprintEngine *engine, const GaussianSta
         DrawText(label, (int)p.x + 6, (int)p.y - 6, 13, color);
     }
 }
-
-typedef struct {
-    bool active;
-    bool cell_active;
-    int row;
-    int col;
-    int timeline_index;
-    char title[64];
-    char body[320];
-    Vector2 screen_anchor;
-} MatrixInspector;
 
 static const char *state_axis_label(int index) {
     static const char *labels[] = {"x", "y", "vx", "vy", "theta"};
@@ -948,6 +1050,74 @@ static void draw_sensor_matrix_panel(const BlueprintEngine *engine, const Matrix
                                   cell_hover ? hover_row : selected_row,
                                   cell_hover ? hover_col : selected_col,
                                   title);
+}
+
+static bool hover_world_rect_screen(const BlueprintEngine *engine, DVec2 origin, Vector2 size) {
+    Vector2 a = blueprint_world_to_screen(engine, origin);
+    Vector2 b = blueprint_world_to_screen(engine, dvec2(origin.x + size.x, origin.y + size.y));
+    Rectangle rect = {a.x, a.y, b.x - a.x, b.y - a.y};
+    if (rect.width < 0.0f) {
+        rect.x += rect.width;
+        rect.width = -rect.width;
+    }
+    if (rect.height < 0.0f) {
+        rect.y += rect.height;
+        rect.height = -rect.height;
+    }
+    return CheckCollisionPointRec(GetMousePosition(), rect);
+}
+
+static void draw_math_matrix_panel(const BlueprintEngine *engine, const Matrix *matrix, DVec2 origin, float cell_size, const char *title, const char *description, MatrixInspector *inspector, int selected_row, int selected_col, int focus_row, int focus_col, bool *out_hovered, int *out_row, int *out_col) {
+    int hover_row = -1;
+    int hover_col = -1;
+    bool hovered = hover_matrix_cell_world(engine, origin, matrix->rows, matrix->cols, cell_size, &hover_row, &hover_col);
+    if (out_hovered != NULL) *out_hovered = hovered;
+    if (out_row != NULL) *out_row = hover_row;
+    if (out_col != NULL) *out_col = hover_col;
+
+    if (hover_matrix_title_screen(engine, origin, cell_size, title)) {
+        set_matrix_inspector(inspector, title, description);
+    }
+    if (hovered) {
+        char body[320];
+        snprintf(body, sizeof(body), "%s[%d,%d] = %.3f. %s", title, hover_row, hover_col, matrix_get(matrix, hover_row, hover_col), description);
+        set_matrix_inspector(inspector, title, body);
+    }
+
+    blueprint_draw_matrix_heatmap(engine, matrix, origin, cell_size, true,
+                                  selected_row, selected_col,
+                                  hovered ? hover_row : focus_row,
+                                  hovered ? hover_col : focus_col,
+                                  title);
+}
+
+static void draw_math_vector_panel(const BlueprintEngine *engine, const Vector *vector, DVec2 origin, float cell_size, const char *title, Color accent, const char *description, MatrixInspector *inspector, int selected_index, bool *out_hovered, int *out_index) {
+    Matrix wrapper = {vector->size, 1, vector->data};
+    int hover_row = -1;
+    int hover_col = -1;
+    bool hovered = hover_matrix_cell_world(engine, origin, wrapper.rows, wrapper.cols, cell_size, &hover_row, &hover_col);
+    if (out_hovered != NULL) *out_hovered = hovered;
+    if (out_index != NULL) *out_index = hover_row;
+
+    if (hover_matrix_title_screen(engine, origin, cell_size, title)) {
+        set_matrix_inspector(inspector, title, description);
+    }
+    if (hovered) {
+        char body[320];
+        snprintf(body, sizeof(body), "%s[%d] = %.3f. %s", title, hover_row, vector->data[hover_row], description);
+        set_matrix_inspector(inspector, title, body);
+    }
+    blueprint_draw_vector_visual(engine, vector, origin, cell_size, true, title, accent);
+    if (selected_index >= 0) {
+        blueprint_draw_matrix_heatmap(engine, &wrapper, origin, cell_size, true, selected_index, 0, selected_index, 0, title);
+    }
+}
+
+static void maybe_describe_math_node(const BlueprintEngine *engine, const MathNode *node, Vector2 size, const char *description, MatrixInspector *inspector) {
+    DVec2 origin = dvec2(node->position.x - size.x * 0.5, node->position.y - size.y * 0.5);
+    if (hover_world_rect_screen(engine, origin, size)) {
+        set_matrix_inspector(inspector, node->name, description);
+    }
 }
 
 static void debugger_execute_current_step(FusionSceneData *scene) {

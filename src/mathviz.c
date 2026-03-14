@@ -385,9 +385,9 @@ void blueprint_draw_matrix_multiply_visualizer(const BlueprintEngine *engine, co
     char line0[128];
     char line1[128];
     char line2[128];
-    snprintf(line0, sizeof(line0), "active output: C[%d,%d]", i, j);
-    snprintf(line1, sizeof(line1), "term k=%d: %.2f x %.2f", k, matrix_get(a, i, k), matrix_get(b, k, j));
-    snprintf(line2, sizeof(line2), "partial sum: %.3f / final %.3f", partial, matrix_get(c, i, j));
+    snprintf(line0, sizeof(line0), "active output: C[%d,%d]  (same primitive as HPH^T, Kz, or graph blocks)", i, j);
+    snprintf(line1, sizeof(line1), "term k=%d: %.2f x %.2f  (one Jacobian/state contribution)", k, matrix_get(a, i, k), matrix_get(b, k, j));
+    snprintf(line2, sizeof(line2), "partial sum: %.3f / final %.3f  (engineers inspect these when debugging updates)", partial, matrix_get(c, i, j));
     const char *lines[] = {line0, line1, line2};
     blueprint_draw_equation_block(engine, dvec2(origin_b.x + b->cols * cell_size + 60.0, origin_b.y - cell_size * 0.5), "row(A) . column(B)", lines, 3, (Color){236, 243, 248, 255});
 }
