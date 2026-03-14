@@ -242,6 +242,11 @@ typedef struct {
     int preset_mode;
     double last_time;
     double pulse_strength;
+    int debug_step;
+    bool debug_running;
+    double debug_accum;
+    double debug_temp[2];
+    DVec2 code_origin;
     Color accent;
     char source_name[32];
 } HXSceneData;
@@ -2112,6 +2117,7 @@ static void initialize_hx_scene(HXSceneData *scene) {
     scene->matrix_origin = dvec2(920.0, 230.0);
     scene->predicted_vector_origin = dvec2(1320.0, 340.0);
     scene->predicted_point_origin = dvec2(1910.0, 160.0);
+    scene->code_origin = dvec2(1540.0, 760.0);
     scene->preset_position_origin = dvec2(820.0, -220.0);
     scene->preset_velocity_origin = dvec2(1120.0, -220.0);
     scene->preset_linear_origin = dvec2(1420.0, -220.0);
@@ -2119,6 +2125,11 @@ static void initialize_hx_scene(HXSceneData *scene) {
     scene->scene_max = dvec2(2500.0, 1250.0);
     set_hx_source(scene, "GPS");
     set_hx_preset(scene, 0);
+    scene->debug_step = 0;
+    scene->debug_running = false;
+    scene->debug_accum = 0.0;
+    scene->debug_temp[0] = 0.0;
+    scene->debug_temp[1] = 0.0;
 }
 
 static HXSceneData *create_hx_scene(void) {
@@ -2164,6 +2175,12 @@ static void advance_hx_scene(HXSceneData *scene, const BlueprintEngine *engine) 
     Matrix xcol = {4, 1, scene->state_vector.data};
     Matrix hxcol = {2, 1, scene->predicted_measurement.data};
     matrix_multiply_into(&scene->H, &xcol, &hxcol);
+    scene->debug_temp[0] = 0.0;
+    scene->debug_temp[1] = 0.0;
+    for (int k = 0; k < 4; ++k) {
+        scene->debug_temp[0] += matrix_get(&scene->H, 0, k) * scene->state_vector.data[k];
+        scene->debug_temp[1] += matrix_get(&scene->H, 1, k) * scene->state_vector.data[k];
+    }
     scene->pulse_strength *= pow(0.16, dt);
 
     int hover_row = -1;
@@ -2217,6 +2234,16 @@ static void advance_hx_scene(HXSceneData *scene, const BlueprintEngine *engine) 
     }
 }
 
+static void reset_hx_debugger(HXSceneData *scene) {
+    if (scene == NULL) {
+        return;
+    }
+    scene->debug_step = 0;
+    scene->debug_running = false;
+    scene->debug_accum = 0.0;
+    scene->pulse_strength = 1.0;
+}
+
 static void draw_hx_scene_node(Camera2D cam) {
     (void)cam;
     const BlueprintEngine *engine = blueprint_active_engine();
@@ -2228,16 +2255,37 @@ static void draw_hx_scene_node(Camera2D cam) {
     static const double pos_values[8] = {1,0,0,0, 0,1,0,0};
     static const double vel_values[8] = {0,0,1,0, 0,0,0,1};
     static const double lin_values[8] = {0.8,0,0.2,0, 0,0.7,0,0.3};
+    static const char *code_lines[] = {
+        "Vec4 state = {px, py, vx, vy};",
+        "Mat2x4 H = {{1,0,0,0},{0,1,0,0}};",
+        "double y0 = dot(H.row(0), state);",
+        "predicted_measurement[0] = y0;",
+        "double y1 = dot(H.row(1), state);",
+        "predicted_measurement[1] = y1;"
+    };
+
     DVec2 vehicle = dvec2(g_hx_scene->true_vehicle.position.x, g_hx_scene->true_vehicle.position.y);
     DVec2 vel_tip = dvec2(vehicle.x + g_hx_scene->true_vehicle.velocity.x * 0.9,
                           vehicle.y + g_hx_scene->true_vehicle.velocity.y * 0.9);
     DVec2 hx_point = dvec2(g_hx_scene->predicted_measurement.data[0], g_hx_scene->predicted_measurement.data[1]);
+    int exec_row = -1;
+    Color exec_color = g_hx_scene->accent;
+    if (g_hx_scene->debug_step == 0) {
+        exec_color = (Color){120, 196, 255, 255};
+    } else if (g_hx_scene->debug_step == 1 || g_hx_scene->debug_step == 2 || g_hx_scene->debug_step == 3) {
+        exec_row = 0;
+        exec_color = innovation_measurement_color(0);
+    } else if (g_hx_scene->debug_step == 4 || g_hx_scene->debug_step == 5) {
+        exec_row = 1;
+        exec_color = innovation_measurement_color(1);
+    }
 
     blueprint_draw_state_trajectory(engine, g_hx_scene->true_path, g_hx_scene->path_count, (Color){224, 232, 242, 120});
     blueprint_draw_state_trajectory(engine, g_hx_scene->predicted_path, g_hx_scene->path_count, Fade(g_hx_scene->accent, 0.55f));
     draw_true_vehicle_marker(engine, &g_hx_scene->true_vehicle, (Color){238, 238, 244, 255});
     blueprint_draw_arrow(engine, vehicle, vel_tip, 2.2f, (Color){120, 196, 255, 255});
     blueprint_draw_signal_arrow(engine, vehicle, hx_point, 1.8f, g_hx_scene->accent, 0.2);
+    blueprint_draw_tensor_flow_edge(engine, vehicle, dvec2(g_hx_scene->state_vector_origin.x - 90.0, g_hx_scene->state_vector_origin.y + 110.0), (Color){120, 196, 255, 255}, NULL, true);
 
     Vector2 vp = blueprint_world_to_screen(engine, vehicle);
     DrawText("x", (int)vp.x + 10, (int)vp.y - 14, 14, (Color){232, 238, 246, 255});
@@ -2245,30 +2293,48 @@ static void draw_hx_scene_node(Camera2D cam) {
     DrawCircleV(hp, 6.0f, g_hx_scene->accent);
     DrawCircleLinesV(hp, 10.0f + (float)(g_hx_scene->pulse_strength * 8.0), Fade(g_hx_scene->accent, 0.9f));
     DrawText("Hx", (int)hp.x + 10, (int)hp.y - 14, 14, g_hx_scene->accent);
+    if (g_hx_scene->debug_step == 0) {
+        draw_world_focus_ring(engine, vehicle, exec_color, 18.0f);
+        blueprint_draw_signal_arrow(engine, vehicle, vel_tip, 2.4f, exec_color, 0.36);
+    }
+    if (g_hx_scene->debug_step >= 3) {
+        draw_world_focus_ring(engine, hx_point, exec_color, 18.0f);
+    }
 
     blueprint_draw_vector_visual(engine, &g_hx_scene->state_vector, g_hx_scene->state_vector_origin, g_hx_scene->cell_size, true, "x", (Color){120, 196, 255, 255});
     blueprint_draw_matrix_heatmap(engine, &g_hx_scene->H, g_hx_scene->matrix_origin, g_hx_scene->cell_size, true,
-                                  g_hx_scene->active_row, g_hx_scene->active_col,
-                                  g_hx_scene->active_row, g_hx_scene->active_col,
+                                  exec_row >= 0 ? exec_row : g_hx_scene->active_row,
+                                  g_hx_scene->active_col,
+                                  exec_row >= 0 ? exec_row : g_hx_scene->active_row,
+                                  g_hx_scene->active_col,
                                   "H");
     blueprint_draw_vector_visual(engine, &g_hx_scene->predicted_measurement, g_hx_scene->predicted_vector_origin, g_hx_scene->cell_size, true, "Hx", g_hx_scene->accent);
+    if (g_hx_scene->debug_step == 0) {
+        Matrix wrapper = {g_hx_scene->state_vector.size, 1, g_hx_scene->state_vector.data};
+        blueprint_draw_matrix_heatmap(engine, &wrapper, g_hx_scene->state_vector_origin, g_hx_scene->cell_size, true, -1, -1, 0, 0, "x");
+    }
+    if (exec_row >= 0) {
+        Matrix wrapper = {g_hx_scene->predicted_measurement.size, 1, g_hx_scene->predicted_measurement.data};
+        blueprint_draw_matrix_heatmap(engine, &wrapper, g_hx_scene->predicted_vector_origin, g_hx_scene->cell_size, true, exec_row, 0, exec_row, 0, "Hx");
+    }
 
     for (int c = 0; c < 4; ++c) {
         DVec2 target = dvec2(g_hx_scene->matrix_origin.x + c * g_hx_scene->cell_size + g_hx_scene->cell_size * 0.5,
-                             g_hx_scene->matrix_origin.y + g_hx_scene->active_row * g_hx_scene->cell_size + g_hx_scene->cell_size * 0.5);
-        bool active = c == g_hx_scene->active_col || fabs(matrix_get(&g_hx_scene->H, g_hx_scene->active_row, c)) > 0.01;
-        draw_state_component_link(engine, g_hx_scene->state_vector_origin, c, target, (Color){120, 196, 255, 255}, active);
+                             g_hx_scene->matrix_origin.y + (exec_row >= 0 ? exec_row : g_hx_scene->active_row) * g_hx_scene->cell_size + g_hx_scene->cell_size * 0.5);
+        bool active = exec_row >= 0 ? fabs(matrix_get(&g_hx_scene->H, exec_row, c)) > 0.01
+                                    : (c == g_hx_scene->active_col || fabs(matrix_get(&g_hx_scene->H, g_hx_scene->active_row, c)) > 0.01);
+        draw_state_component_link(engine, g_hx_scene->state_vector_origin, c, target, active ? exec_color : (Color){120, 196, 255, 255}, active);
     }
     blueprint_draw_tensor_flow_edge(engine,
-                                    dvec2(g_hx_scene->matrix_origin.x + 4.0 * g_hx_scene->cell_size + 28.0, g_hx_scene->matrix_origin.y + g_hx_scene->active_row * g_hx_scene->cell_size + g_hx_scene->cell_size * 0.5),
-                                    dvec2(g_hx_scene->predicted_vector_origin.x, g_hx_scene->predicted_vector_origin.y + g_hx_scene->active_row * g_hx_scene->cell_size + g_hx_scene->cell_size * 0.5),
-                                    g_hx_scene->accent,
+                                    dvec2(g_hx_scene->matrix_origin.x + 4.0 * g_hx_scene->cell_size + 28.0, g_hx_scene->matrix_origin.y + (exec_row >= 0 ? exec_row : g_hx_scene->active_row) * g_hx_scene->cell_size + g_hx_scene->cell_size * 0.5),
+                                    dvec2(g_hx_scene->predicted_vector_origin.x, g_hx_scene->predicted_vector_origin.y + (exec_row >= 0 ? exec_row : g_hx_scene->active_row) * g_hx_scene->cell_size + g_hx_scene->cell_size * 0.5),
+                                    exec_color,
                                     NULL,
                                     true);
     blueprint_draw_tensor_flow_edge(engine,
                                     dvec2(g_hx_scene->predicted_vector_origin.x + g_hx_scene->cell_size * 0.8, g_hx_scene->predicted_vector_origin.y + g_hx_scene->cell_size),
                                     hx_point,
-                                    g_hx_scene->accent,
+                                    exec_color,
                                     NULL,
                                     true);
 
@@ -2282,9 +2348,30 @@ static void draw_hx_scene_node(Camera2D cam) {
                          dvec2(g_hx_scene->predicted_point_origin.x + g_hx_scene->predicted_measurement.data[0] * 0.8,
                                g_hx_scene->predicted_point_origin.y + g_hx_scene->predicted_measurement.data[1] * 0.8),
                          2.4f,
-                         g_hx_scene->accent);
+                         exec_row >= 0 ? exec_color : g_hx_scene->accent);
     Vector2 pp = blueprint_world_to_screen(engine, g_hx_scene->predicted_point_origin);
     DrawText(g_hx_scene->source_name, (int)pp.x - 10, (int)pp.y - 88, 14, g_hx_scene->accent);
+
+    {
+        Vector2 code_anchor = blueprint_world_to_screen(engine, g_hx_scene->code_origin);
+        for (int i = 0; i < 6; ++i) {
+            Color line_color = i == g_hx_scene->debug_step ? color_lerp(exec_color, WHITE, 0.2f) : (Color){188, 202, 220, 255};
+            if (i == g_hx_scene->debug_step) {
+                DrawRectangle((int)code_anchor.x - 8, (int)code_anchor.y + i * 24 - 2, MeasureText(code_lines[i], 17) + 16, 22, Fade(exec_color, 0.24f));
+            }
+            DrawText(code_lines[i], (int)code_anchor.x, (int)code_anchor.y + i * 24, 17, line_color);
+        }
+        char state_line[160];
+        char y0_line[96];
+        char y1_line[96];
+        snprintf(state_line, sizeof(state_line), "state = {%.1f, %.1f, %.1f, %.1f}", g_hx_scene->state_vector.data[0], g_hx_scene->state_vector.data[1], g_hx_scene->state_vector.data[2], g_hx_scene->state_vector.data[3]);
+        snprintf(y0_line, sizeof(y0_line), "y0 = %.2f", g_hx_scene->debug_temp[0]);
+        snprintf(y1_line, sizeof(y1_line), "y1 = %.2f", g_hx_scene->debug_temp[1]);
+        DrawText(state_line, (int)code_anchor.x + 18, (int)code_anchor.y + 170, 14, (Color){214, 224, 236, 255});
+        DrawText(y0_line, (int)code_anchor.x + 18, (int)code_anchor.y + 194, 14, innovation_measurement_color(0));
+        DrawText(y1_line, (int)code_anchor.x + 18, (int)code_anchor.y + 216, 14, innovation_measurement_color(1));
+        DrawText(g_hx_scene->debug_running ? "SHIFT+SPACE run" : "SPACE step", (int)code_anchor.x + 18, (int)code_anchor.y + 242, 14, (Color){184, 196, 214, 255});
+    }
 }
 
 static void draw_causal_chain_overlay(const BlueprintEngine *engine, const FusionSceneData *scene) {
@@ -3408,6 +3495,38 @@ void blueprint_open_hx_lab(BlueprintEngine *engine, const char *source_name) {
     engine->camera.target_y = engine->camera.target_goal_y;
     engine->camera.zoom_goal = 0.14;
     engine->camera.zoom = 0.14;
+}
+
+bool blueprint_scene_handle_global_input(BlueprintEngine *engine) {
+    if (engine == NULL || engine->active_page != 5 || g_hx_scene == NULL) {
+        return false;
+    }
+    if (IsKeyPressed(KEY_R)) {
+        initialize_hx_scene(g_hx_scene);
+        reset_hx_debugger(g_hx_scene);
+        return true;
+    }
+    if (IsKeyPressed(KEY_SPACE)) {
+        if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) {
+            g_hx_scene->debug_running = !g_hx_scene->debug_running;
+        } else {
+            g_hx_scene->debug_running = false;
+            g_hx_scene->debug_step = (g_hx_scene->debug_step + 1) % 6;
+            g_hx_scene->pulse_strength = 1.0;
+        }
+        return true;
+    }
+    if (g_hx_scene->debug_running) {
+        g_hx_scene->debug_accum += GetFrameTime();
+        if (g_hx_scene->debug_accum >= 0.55) {
+            g_hx_scene->debug_accum = 0.0;
+            g_hx_scene->debug_step = (g_hx_scene->debug_step + 1) % 6;
+            g_hx_scene->pulse_strength = 1.0;
+        }
+    } else {
+        g_hx_scene->debug_accum = 0.0;
+    }
+    return true;
 }
 
 void blueprint_init_demo(BlueprintEngine *engine) {

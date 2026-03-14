@@ -276,6 +276,7 @@ void blueprint_open_innovation_lab(BlueprintEngine *engine, const char *source_n
 void blueprint_open_h_lab(BlueprintEngine *engine, const char *source_name);
 void blueprint_open_r_lab(BlueprintEngine *engine, const char *source_name);
 void blueprint_open_hx_lab(BlueprintEngine *engine, const char *source_name);
+bool blueprint_scene_handle_global_input(BlueprintEngine *engine);
 bool blueprint_scene_blocks_pan(const BlueprintEngine *engine, Vector2 mouse);
 
 Camera2D blueprint_camera_snapshot(const BlueprintEngine *engine);

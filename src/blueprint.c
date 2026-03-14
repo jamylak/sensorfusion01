@@ -437,12 +437,14 @@ static void handle_camera_input(BlueprintEngine *engine) {
     if (IsKeyPressed(KEY_FOUR)) engine->active_page = 3;
     if (IsKeyPressed(KEY_FIVE)) engine->active_page = 4;
     if (IsKeyPressed(KEY_SIX)) engine->active_page = 5;
-    if (IsKeyPressed(KEY_SPACE)) engine->paused = !engine->paused;
-    if (IsKeyPressed(KEY_R)) {
-        int page = engine->active_page;
-        blueprint_engine_reset(engine, GetScreenWidth(), GetScreenHeight());
-        engine->active_page = page;
-        blueprint_reset_demo(engine);
+    if (!blueprint_scene_handle_global_input(engine)) {
+        if (IsKeyPressed(KEY_SPACE)) engine->paused = !engine->paused;
+        if (IsKeyPressed(KEY_R)) {
+            int page = engine->active_page;
+            blueprint_engine_reset(engine, GetScreenWidth(), GetScreenHeight());
+            engine->active_page = page;
+            blueprint_reset_demo(engine);
+        }
     }
     if (IsKeyPressed(KEY_Q)) engine->quit_requested = true;
 
