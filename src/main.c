@@ -154,6 +154,11 @@ typedef struct {
     int path_count;
     DVec2 measurement_point;
     DVec2 auto_measurement_point;
+    DVec2 sampled_truth_point;
+    DVec2 recent_noise_offsets[64];
+    int recent_noise_count;
+    int recent_noise_head;
+    int measurement_index;
     DVec2 projection_reference;
     double last_time;
     double next_measurement_time;
@@ -310,6 +315,8 @@ static void debugger_step_gain(void);
 static void debugger_step_state_correction(void);
 static void debugger_step_covariance_update(void);
 static void debugger_draw_overlay(void);
+static void deterministic_gaussian_pair(int index, double *out_x, double *out_y);
+static DVec2 correlated_noise_sample(const Matrix *covariance, double n1, double n2);
 
 static DVec2 dvec2(double x, double y) {
     DVec2 v = {x, y};
@@ -1183,6 +1190,96 @@ static void draw_world_axes(const BlueprintEngine *engine, DVec2 origin, double 
     blueprint_draw_arrow(engine, dvec2(origin.x, origin.y + half_extent), dvec2(origin.x, origin.y - half_extent), 1.2f, Fade(color, 0.7f));
 }
 
+static void push_noise_offset(InnovationSceneData *scene, DVec2 offset) {
+    if (scene == NULL) {
+        return;
+    }
+    if (scene->recent_noise_count < (int)(sizeof(scene->recent_noise_offsets) / sizeof(scene->recent_noise_offsets[0]))) {
+        scene->recent_noise_offsets[scene->recent_noise_count++] = offset;
+    } else {
+        scene->recent_noise_offsets[scene->recent_noise_head] = offset;
+        scene->recent_noise_head = (scene->recent_noise_head + 1) % (int)(sizeof(scene->recent_noise_offsets) / sizeof(scene->recent_noise_offsets[0]));
+    }
+}
+
+static DVec2 innovation_noise_history_at(const InnovationSceneData *scene, int index) {
+    int capacity = (int)(sizeof(scene->recent_noise_offsets) / sizeof(scene->recent_noise_offsets[0]));
+    if (scene == NULL || index < 0 || index >= scene->recent_noise_count) {
+        return dvec2(0.0, 0.0);
+    }
+    if (scene->recent_noise_count < capacity) {
+        return scene->recent_noise_offsets[index];
+    }
+    return scene->recent_noise_offsets[(scene->recent_noise_head + index) % capacity];
+}
+
+static void draw_gaussian_histogram_world(const BlueprintEngine *engine, const InnovationSceneData *scene, DVec2 origin, double sigma, double width, double height, Color color, double sample_value, int axis, const char *label) {
+    if (engine == NULL || scene == NULL || sigma <= 1e-6) {
+        return;
+    }
+    enum { HIST_BINS = 11 };
+    int bins[HIST_BINS] = {0};
+    int max_bin = 1;
+    double limit = 3.0 * sigma;
+    double bin_width = (2.0 * limit) / (double)HIST_BINS;
+
+    for (int i = 0; i < scene->recent_noise_count; ++i) {
+        DVec2 noise = innovation_noise_history_at(scene, i);
+        double value = axis == 0 ? noise.x : noise.y;
+        int bin = (int)floor((value + limit) / bin_width);
+        if (bin < 0) {
+            bin = 0;
+        }
+        if (bin >= HIST_BINS) {
+            bin = HIST_BINS - 1;
+        }
+        bins[bin] += 1;
+        if (bins[bin] > max_bin) {
+            max_bin = bins[bin];
+        }
+    }
+
+    draw_world_axes(engine, origin, width * 0.55, Fade(color, 0.35f));
+
+    for (int i = 0; i <= 30; ++i) {
+        double t = (double)i / 30.0;
+        double x = -width * 0.5 + width * t;
+        double sample_x = -limit + (2.0 * limit) * t;
+        double y = exp(-0.5 * (sample_x * sample_x) / (sigma * sigma));
+        Vector2 p = blueprint_world_to_screen(engine, dvec2(origin.x + x, origin.y - y * height));
+        DrawCircleV(p, 1.9f, Fade(color, 0.38f));
+    }
+
+    for (int i = 0; i < HIST_BINS; ++i) {
+        double x0 = origin.x - width * 0.5 + width * ((double)i / (double)HIST_BINS);
+        double x1 = origin.x - width * 0.5 + width * ((double)(i + 1) / (double)HIST_BINS);
+        double bar_h = height * ((double)bins[i] / (double)max_bin);
+        Vector2 a = blueprint_world_to_screen(engine, dvec2(x0 + 2.0, origin.y));
+        Vector2 b = blueprint_world_to_screen(engine, dvec2(x1 - 2.0, origin.y - bar_h));
+        Rectangle rect = {a.x, b.y, b.x - a.x, a.y - b.y};
+        if (rect.width < 0.0f) {
+            rect.x += rect.width;
+            rect.width = -rect.width;
+        }
+        if (rect.height < 0.0f) {
+            rect.y += rect.height;
+            rect.height = -rect.height;
+        }
+        DrawRectangleRec(rect, Fade(color, 0.46f));
+        DrawRectangleLinesEx(rect, 1.0f, Fade(color, 0.72f));
+    }
+
+    double clamped = sample_value;
+    if (clamped > limit) clamped = limit;
+    if (clamped < -limit) clamped = -limit;
+    double marker_t = clamped / limit;
+    double marker_x = origin.x + marker_t * (width * 0.5);
+    draw_world_focus_ring(engine, dvec2(marker_x, origin.y + 2.0), color, 8.0f);
+
+    Vector2 lp = blueprint_world_to_screen(engine, dvec2(origin.x - width * 0.52, origin.y - height - 26.0));
+    DrawText(label, (int)lp.x, (int)lp.y, 14, color);
+}
+
 static void advance_innovation_scene(InnovationSceneData *scene, const BlueprintEngine *engine) {
     if (scene == NULL || engine == NULL) {
         return;
@@ -1225,7 +1322,13 @@ static void advance_innovation_scene(InnovationSceneData *scene, const Blueprint
     matrix_multiply_into(&scene->measurement_model.H, &(Matrix){4, 1, scene->state_vector.data}, &(Matrix){2, 1, scene->projected_measurement.data});
 
     if (t >= scene->next_measurement_time) {
-        scene->auto_measurement_point = dvec2(true_x + 34.0 * sin(t * 0.83), true_y + 28.0 * cos(t * 0.69));
+        double n1 = 0.0;
+        double n2 = 0.0;
+        deterministic_gaussian_pair(scene->measurement_index++, &n1, &n2);
+        DVec2 noise = correlated_noise_sample(&scene->measurement_model.R, n1, n2);
+        scene->sampled_truth_point = dvec2(true_x, true_y);
+        scene->auto_measurement_point = dvec2(true_x + noise.x, true_y + noise.y);
+        push_noise_offset(scene, noise);
         scene->source_timestamp = t;
         scene->pulse_strength = 1.0;
         scene->next_measurement_time += 0.85;
@@ -1246,11 +1349,13 @@ static void advance_innovation_scene(InnovationSceneData *scene, const Blueprint
     if (scene->measurement_drag_active) {
         DVec2 mouse_world = blueprint_screen_to_world(engine, GetMousePosition());
         scene->measurement_point = mouse_world;
+        scene->sampled_truth_point = dvec2(true_x, true_y);
     }
     if (IsKeyPressed(KEY_G)) {
         scene->measurement_manual = false;
         scene->measurement_drag_active = false;
         scene->measurement_point = scene->auto_measurement_point;
+        scene->sampled_truth_point = dvec2(true_x, true_y);
     }
 
     scene->measurement_model.z.data[0] = scene->measurement_point.x;
@@ -1292,10 +1397,11 @@ static void draw_innovation_scene_node(Camera2D cam) {
     DVec2 innovation_tip = dvec2(g_innovation_scene->innovation.innovation.data[0], g_innovation_scene->innovation.innovation.data[1]);
     DVec2 z_story_origin = dvec2(-2280.0, 520.0);
     DVec2 z_sensor_origin = dvec2(z_story_origin.x - 210.0, z_story_origin.y - 40.0);
-    DVec2 z_vehicle_origin = dvec2(z_story_origin.x + (truth.x - g_innovation_scene->projection_reference.x) * 0.12,
-                                   z_story_origin.y + (truth.y - g_innovation_scene->projection_reference.y) * 0.12);
-    DVec2 z_sample_origin = dvec2(z_story_origin.x + 250.0 + (measured.x - truth.x) * 0.16,
-                                  z_story_origin.y + (measured.y - truth.y) * 0.16);
+    DVec2 z_motion_origin = dvec2(z_story_origin.x + 80.0 + (g_innovation_scene->sampled_truth_point.x - g_innovation_scene->projection_reference.x) * 0.08,
+                                  z_story_origin.y + 10.0 + (g_innovation_scene->sampled_truth_point.y - g_innovation_scene->projection_reference.y) * 0.08);
+    DVec2 z_sample_origin = dvec2(z_motion_origin.x + (measured.x - g_innovation_scene->sampled_truth_point.x) * 0.35,
+                                  z_motion_origin.y + (measured.y - g_innovation_scene->sampled_truth_point.y) * 0.35);
+    DVec2 z_local_truth_origin = dvec2(z_story_origin.x + 60.0, z_story_origin.y + 248.0);
     DVec2 z_vector_origin = dvec2(z_story_origin.x + 560.0, z_story_origin.y - 6.0);
     MatrixInspector inspector = {0};
     int linked_state = -1;
@@ -1314,42 +1420,87 @@ static void draw_innovation_scene_node(Camera2D cam) {
 
     {
         Vector z_vector = {2, g_innovation_scene->measurement_model.z.data};
+        char sample_value_line[96];
+        char noise_value_line[96];
+        char vector_value_line[96];
+        char cloud_value_line[96];
+        double dx = measured.x - g_innovation_scene->sampled_truth_point.x;
+        double dy = measured.y - g_innovation_scene->sampled_truth_point.y;
+        double local_noise_scale = 0.35;
+        double sigma_x = sqrt(fmax(matrix_get(&g_innovation_scene->measurement_model.R, 0, 0), 1e-6));
+        double sigma_y = sqrt(fmax(matrix_get(&g_innovation_scene->measurement_model.R, 1, 1), 1e-6));
+        CovarianceData local_cov = {
+            matrix_get(&g_innovation_scene->measurement_model.R, 0, 0) * local_noise_scale * local_noise_scale,
+            matrix_get(&g_innovation_scene->measurement_model.R, 0, 1) * local_noise_scale * local_noise_scale,
+            matrix_get(&g_innovation_scene->measurement_model.R, 1, 1) * local_noise_scale * local_noise_scale,
+            2.15
+        };
         Vector2 sensor_screen = blueprint_world_to_screen(engine, z_sensor_origin);
-        Vector2 vehicle_screen = blueprint_world_to_screen(engine, z_vehicle_origin);
+        Vector2 vehicle_screen = blueprint_world_to_screen(engine, z_motion_origin);
         Vector2 sample_screen = blueprint_world_to_screen(engine, z_sample_origin);
         Vector2 story_screen = blueprint_world_to_screen(engine, dvec2(z_story_origin.x - 130.0, z_story_origin.y - 150.0));
+        Vector2 noise_mid_screen = blueprint_world_to_screen(engine, dvec2((z_motion_origin.x + z_sample_origin.x) * 0.5,
+                                                                           (z_motion_origin.y + z_sample_origin.y) * 0.5 - 42.0));
+        Vector2 relation_screen = blueprint_world_to_screen(engine, dvec2(z_story_origin.x - 10.0, z_story_origin.y + 140.0));
+        Vector2 local_title_screen = blueprint_world_to_screen(engine, dvec2(z_story_origin.x - 12.0, z_story_origin.y + 208.0));
+        Vector2 vector_value_screen = blueprint_world_to_screen(engine, dvec2(z_vector_origin.x + 126.0, z_vector_origin.y + 8.0));
+        Vector2 cloud_screen = blueprint_world_to_screen(engine, dvec2(z_story_origin.x - 86.0, z_story_origin.y + 228.0));
+
+        snprintf(sample_value_line, sizeof(sample_value_line), "z = [%.1f m, %.1f m]", measured.x, measured.y);
+        snprintf(noise_value_line, sizeof(noise_value_line), "noise = [%.1f m, %.1f m]", dx, dy);
+        snprintf(vector_value_line, sizeof(vector_value_line), "two GPS numbers: x_meas, y_meas");
+        snprintf(cloud_value_line, sizeof(cloud_value_line), "gps cloud ~ N(0, R) around truth");
 
         DrawText("where z comes from", (int)story_screen.x, (int)story_screen.y, 18, (Color){214, 222, 232, 255});
-        DrawText("GPS observes the true vehicle and emits a noisy sample", (int)story_screen.x, (int)story_screen.y + 24, 14, (Color){150, 168, 188, 255});
+        DrawText("top: moving physical scene at the sampling instant", (int)story_screen.x, (int)story_screen.y + 24, 14, (Color){150, 168, 188, 255});
+        DrawText("GPS observes the vehicle and emits a noisy position sample", (int)story_screen.x, (int)story_screen.y + 44, 14, (Color){150, 168, 188, 255});
+        DrawText("z is not magic: it is just the sensor's measured x/y position", (int)story_screen.x, (int)story_screen.y + 64, 14, (Color){150, 168, 188, 255});
+        DrawText("z = true position + noise", (int)relation_screen.x, (int)relation_screen.y, 15, (Color){255, 236, 170, 255});
+        DrawText("bottom: local noise frame", (int)local_title_screen.x, (int)local_title_screen.y, 14, (Color){182, 198, 218, 255});
+        DrawText(cloud_value_line, (int)cloud_screen.x, (int)cloud_screen.y, 14, (Color){178, 194, 214, 255});
         DrawCircleV(sensor_screen, 7.0f, g_innovation_scene->accent);
         DrawCircleLinesV(sensor_screen, 12.0f, Fade(g_innovation_scene->accent, 0.85f));
         DrawCircleV(vehicle_screen, 6.0f, (Color){238, 238, 244, 255});
         DrawCircleV(sample_screen, 7.0f, g_innovation_scene->accent);
         DrawCircleLinesV(sample_screen, 12.0f, Fade(g_innovation_scene->accent, 0.85f));
+        DrawCircleLinesV(sample_screen, 18.0f + (float)(g_innovation_scene->pulse_strength * 10.0), Fade(g_innovation_scene->accent, 0.35f));
         DrawText("gps sensor", (int)sensor_screen.x + 10, (int)sensor_screen.y - 10, 14, g_innovation_scene->accent);
         DrawText("true vehicle", (int)vehicle_screen.x + 10, (int)vehicle_screen.y - 10, 14, (Color){236, 236, 244, 255});
         DrawText("z sample", (int)sample_screen.x + 10, (int)sample_screen.y - 10, 14, g_innovation_scene->accent);
 
-        blueprint_draw_signal_arrow(engine, z_sensor_origin, z_vehicle_origin, 1.2f, Fade(g_innovation_scene->accent, 0.4f), 0.04);
+        blueprint_draw_signal_arrow(engine, z_sensor_origin, z_motion_origin, 1.2f, Fade(g_innovation_scene->accent, 0.4f), 0.04);
         blueprint_draw_signal_arrow(engine, z_sensor_origin, z_sample_origin, 1.9f, g_innovation_scene->accent, 0.12);
-        blueprint_draw_arrow(engine, z_vehicle_origin, z_sample_origin, 1.6f, Fade(g_innovation_scene->accent, 0.7f));
-        blueprint_draw_measurement_covariance(engine, z_sample_origin, &g_innovation_scene->measurement_model.R, Fade(g_innovation_scene->accent, 0.72f), NULL);
+        blueprint_draw_arrow(engine, z_motion_origin, z_sample_origin, 1.6f, Fade(g_innovation_scene->accent, 0.7f));
+        for (int i = 0; i < g_innovation_scene->recent_noise_count; ++i) {
+            DVec2 noise = innovation_noise_history_at(g_innovation_scene, i);
+            DVec2 sample = dvec2(z_local_truth_origin.x + noise.x * local_noise_scale,
+                                 z_local_truth_origin.y + noise.y * local_noise_scale);
+            Vector2 sp = blueprint_world_to_screen(engine, sample);
+            DrawCircleV(sp, 2.6f, Fade(g_innovation_scene->accent, 0.32f));
+        }
+        blueprint_draw_covariance_ellipse(engine, z_local_truth_origin, &local_cov, Fade(g_innovation_scene->accent, 0.72f));
+        draw_world_focus_ring(engine, z_local_truth_origin, (Color){236, 236, 244, 180}, 10.0f);
         blueprint_draw_vector_visual(engine, &z_vector, z_vector_origin, g_innovation_scene->cell_size, true, "z", g_innovation_scene->accent);
         blueprint_draw_tensor_flow_edge(engine, z_sample_origin, dvec2(z_vector_origin.x - 92.0, z_vector_origin.y + g_innovation_scene->cell_size), g_innovation_scene->accent, "sample -> vector", true);
+        DrawText(sample_value_line, (int)sample_screen.x - 24, (int)sample_screen.y + 18, 13, g_innovation_scene->accent);
+        DrawText(noise_value_line, (int)noise_mid_screen.x - 48, (int)noise_mid_screen.y, 13, Fade(g_innovation_scene->accent, 0.95f));
+        DrawText(vector_value_line, (int)vector_value_screen.x, (int)vector_value_screen.y, 14, (Color){194, 206, 222, 255});
+        draw_gaussian_histogram_world(engine, g_innovation_scene, dvec2(z_story_origin.x - 30.0, z_story_origin.y + 370.0), sigma_x, 240.0, 78.0, g_innovation_scene->accent, dx, 0, "x-noise histogram");
+        draw_gaussian_histogram_world(engine, g_innovation_scene, dvec2(z_story_origin.x + 290.0, z_story_origin.y + 370.0), sigma_y, 240.0, 78.0, (Color){255, 212, 150, 255}, dy, 1, "y-noise histogram");
 
         if (hover_world_circle_screen(engine, z_sensor_origin, 14.0f)) {
             set_matrix_inspector(&inspector, "gps sensor",
                                  "This is the physical source of z. It observes the true vehicle position and produces a noisy position sample.");
             linked_measurement = 1;
         }
-        if (hover_world_circle_screen(engine, z_vehicle_origin, 12.0f)) {
+        if (hover_world_circle_screen(engine, z_motion_origin, 12.0f)) {
             set_matrix_inspector(&inspector, "true vehicle for z",
-                                 "The real vehicle state being observed. z starts here in the physical world before it becomes a measurement vector.");
+                                 "Moving vehicle in the physical mini-scene. Each GPS sample is taken from this vehicle position at the sampling instant.");
             linked_measurement = 1;
         }
         if (hover_world_circle_screen(engine, z_sample_origin, 14.0f)) {
             set_matrix_inspector(&inspector, "z sample",
-                                 "This point is the actual GPS reading. It is z in world coordinates: true vehicle position plus measurement noise.");
+                                 "This point is the actual GPS reading. It is z in world coordinates: sampled true vehicle position plus measurement noise.");
             linked_measurement = 1;
         }
         if (hover_world_rect(engine, z_vector_origin, (Vector2){g_innovation_scene->cell_size, g_innovation_scene->cell_size * 2.0f})) {
@@ -1357,14 +1508,39 @@ static void draw_innovation_scene_node(Camera2D cam) {
                                  "The same GPS sample rewritten as a two-entry measurement vector used by the innovation equation y = z - Hx.");
             linked_measurement = 1;
         }
-        if (hover_screen_label((Vector2){story_screen.x, story_screen.y}, "where z comes from", 18)) {
-            set_matrix_inspector(&inspector, "where z comes from",
-                                 "Dedicated page-3 vignette for the origin of z: real vehicle, GPS observation, noisy sample, then measurement vector.");
+        if (hover_screen_label((Vector2){cloud_screen.x, cloud_screen.y}, cloud_value_line, 14)) {
+            set_matrix_inspector(&inspector, "gps cloud ~ N(0, R) around truth",
+                                 "Recent GPS samples in the vehicle-local frame. The cloud is Gaussian around the true position, and its ellipse is determined by R.");
             linked_measurement = 1;
         }
-        if (hover_screen_label((Vector2){story_screen.x, story_screen.y + 24.0f}, "GPS observes the true vehicle and emits a noisy sample", 14)) {
+        if (hover_screen_label((Vector2){story_screen.x, story_screen.y}, "where z comes from", 18)) {
+            set_matrix_inspector(&inspector, "where z comes from",
+                                 "Dedicated page-3 vignette for the origin of z: moving physical scene on top, local noise statistics below, then measurement vector.");
+            linked_measurement = 1;
+        }
+        if (hover_screen_label((Vector2){story_screen.x, story_screen.y + 24.0f}, "top: moving physical scene at the sampling instant", 14)) {
+            set_matrix_inspector(&inspector, "moving physical scene",
+                                 "This top part follows the vehicle through space. The orange sample is the measurement taken from the white vehicle position at the latest sampling instant.");
+            linked_measurement = 1;
+        }
+        if (hover_screen_label((Vector2){story_screen.x, story_screen.y + 44.0f}, "GPS observes the vehicle and emits a noisy position sample", 14)) {
             set_matrix_inspector(&inspector, "z definition",
                                  "z is the GPS sensor output for the vehicle at this instant. It is a noisy position measurement in meters.");
+            linked_measurement = 1;
+        }
+        if (hover_screen_label((Vector2){story_screen.x, story_screen.y + 64.0f}, "z is not magic: it is just the sensor's measured x/y position", 14)) {
+            set_matrix_inspector(&inspector, "z meaning",
+                                 "The two entries of z are simply the GPS-reported x and y coordinates of the vehicle, measured in meters.");
+            linked_measurement = 1;
+        }
+        if (hover_screen_label((Vector2){relation_screen.x, relation_screen.y}, "z = true position + noise", 15)) {
+            set_matrix_inspector(&inspector, "z = true position + noise",
+                                 "This is the physical measurement model for the vignette. The sample starts from the true vehicle position, then sensor noise offsets it into the reported GPS reading z.");
+            linked_measurement = 1;
+        }
+        if (hover_screen_label((Vector2){local_title_screen.x, local_title_screen.y}, "bottom: local noise frame", 14)) {
+            set_matrix_inspector(&inspector, "local noise frame",
+                                 "This lower part removes vehicle motion and keeps truth fixed so you can inspect only the GPS measurement noise cloud, ellipse, and Gaussian marginals.");
             linked_measurement = 1;
         }
         if (hover_screen_label((Vector2){sensor_screen.x + 10.0f, sensor_screen.y - 10.0f}, "gps sensor", 14)) {
@@ -1374,7 +1550,7 @@ static void draw_innovation_scene_node(Camera2D cam) {
         }
         if (hover_screen_label((Vector2){vehicle_screen.x + 10.0f, vehicle_screen.y - 10.0f}, "true vehicle", 14)) {
             set_matrix_inspector(&inspector, "true vehicle",
-                                 "The object in the real world being measured by the GPS sensor.");
+                                 "Fixed reference point in this local vignette. It represents the current true vehicle position, centered so the noise around it is easy to see.");
             linked_measurement = 1;
         }
         if (hover_screen_label((Vector2){sample_screen.x + 10.0f, sample_screen.y - 10.0f}, "z sample", 14)) {
@@ -1382,9 +1558,24 @@ static void draw_innovation_scene_node(Camera2D cam) {
                                  "Noisy position sample produced by the GPS sensor. This becomes the z vector used later in the math.");
             linked_measurement = 1;
         }
+        if (hover_screen_label((Vector2){sample_screen.x - 24.0f, sample_screen.y + 18.0f}, sample_value_line, 13)) {
+            set_matrix_inspector(&inspector, "z values",
+                                 "These are the two actual numbers inside z: measured x-position and measured y-position, both in meters.");
+            linked_measurement = 1;
+        }
+        if (hover_screen_label((Vector2){noise_mid_screen.x - 48.0f, noise_mid_screen.y}, noise_value_line, 13)) {
+            set_matrix_inspector(&inspector, "measurement noise",
+                                 "This offset is the sensor noise: the difference between the true vehicle position and the reported GPS sample.");
+            linked_measurement = 1;
+        }
         if (hover_screen_label(blueprint_world_to_screen(engine, dvec2(z_vector_origin.x, z_vector_origin.y - g_innovation_scene->cell_size * 0.8)), "z", 16)) {
             set_matrix_inspector(&inspector, "z vector",
                                  "Measurement-space form of the GPS sample. Same physical sample, now represented as the two numbers used in the innovation equation.");
+            linked_measurement = 1;
+        }
+        if (hover_screen_label((Vector2){vector_value_screen.x, vector_value_screen.y}, vector_value_line, 14)) {
+            set_matrix_inspector(&inspector, "two GPS numbers",
+                                 "z is a 2D measurement vector. Its entries are x_meas and y_meas from the GPS sensor, not hidden or magical quantities.");
             linked_measurement = 1;
         }
     }
@@ -2027,6 +2218,23 @@ static double uniform01(void) {
     return ((double)rand() + 1.0) / ((double)RAND_MAX + 2.0);
 }
 
+static double hash_uniform01(int index, int stream) {
+    double s = sin((double)(index * 97 + stream * 131) * 12.9898 + (double)stream * 78.233) * 43758.5453123;
+    return s - floor(s);
+}
+
+static void deterministic_gaussian_pair(int index, double *out_x, double *out_y) {
+    double u1 = hash_uniform01(index, 1);
+    double u2 = hash_uniform01(index, 2);
+    if (u1 < 1e-6) {
+        u1 = 1e-6;
+    }
+    double mag = sqrt(-2.0 * log(u1));
+    double angle = 2.0 * PI * u2;
+    *out_x = mag * cos(angle);
+    *out_y = mag * sin(angle);
+}
+
 static void gaussian_pair(double *out_x, double *out_y) {
     double u1 = uniform01();
     double u2 = uniform01();
@@ -2034,6 +2242,14 @@ static void gaussian_pair(double *out_x, double *out_y) {
     double angle = 2.0 * PI * u2;
     *out_x = mag * cos(angle);
     *out_y = mag * sin(angle);
+}
+
+static DVec2 correlated_noise_sample(const Matrix *covariance, double n1, double n2) {
+    double a = sqrt(fmax(matrix_get(covariance, 0, 0), 1e-6));
+    double b = matrix_get(covariance, 0, 1) / a;
+    double c_sq = matrix_get(covariance, 1, 1) - b * b;
+    double c = sqrt(fmax(c_sq, 1e-6));
+    return dvec2(a * n1, b * n1 + c * n2);
 }
 
 static void compute_sample_covariance(const RSceneData *scene, Matrix *out_cov, DVec2 *out_mean) {
@@ -3416,9 +3632,13 @@ static void initialize_innovation_scene(InnovationSceneData *scene) {
     scene->projection_reference = dvec2(-1000.0, 0.0);
     scene->measurement_point = dvec2(-980.0, 140.0);
     scene->auto_measurement_point = scene->measurement_point;
+    scene->sampled_truth_point = scene->measurement_point;
     scene->next_measurement_time = 0.4;
     scene->source_timestamp = 0.0;
     scene->pulse_strength = 1.0;
+    scene->recent_noise_count = 0;
+    scene->recent_noise_head = 0;
+    scene->measurement_index = 0;
     scene->measurement_manual = false;
     scene->measurement_drag_active = false;
 
