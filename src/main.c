@@ -1066,6 +1066,83 @@ static void draw_sensor_matrix_panel(const BlueprintEngine *engine, const Matrix
                                   title);
 }
 
+static void draw_gain_matrix_panel(const BlueprintEngine *engine, const Matrix *matrix, DVec2 origin, float cell_size, const char *title, const char *sensor_name, MatrixInspector *inspector, int selected_row, int selected_col, bool *out_hovered_cell, int *out_row, int *out_col) {
+    int hover_row = -1;
+    int hover_col = -1;
+    bool cell_hover = hover_matrix_cell_world(engine, origin, matrix->rows, matrix->cols, cell_size, &hover_row, &hover_col);
+    if (out_hovered_cell != NULL) *out_hovered_cell = cell_hover;
+    if (out_row != NULL) *out_row = hover_row;
+    if (out_col != NULL) *out_col = hover_col;
+
+    if (hover_matrix_title_screen(engine, origin, cell_size, title)) {
+        char body[320];
+        snprintf(body, sizeof(body), "Kalman gain for %s. Each row says how strongly a state dimension reacts to a measurement residual.", sensor_name);
+        set_matrix_inspector(inspector, title, body);
+    }
+    if (cell_hover) {
+        char body[320];
+        snprintf(body, sizeof(body), "%s[%s,%s] = %.3f. %s update weight from measurement %s into state %s.", title, state_axis_label(hover_row), measurement_axis_label(hover_col), matrix_get(matrix, hover_row, hover_col), sensor_name, measurement_axis_label(hover_col), state_axis_label(hover_row));
+        set_matrix_inspector(inspector, title, body);
+    }
+
+    blueprint_draw_matrix_heatmap(engine, matrix, origin, cell_size, true,
+                                  selected_row, selected_col,
+                                  cell_hover ? hover_row : selected_row,
+                                  cell_hover ? hover_col : selected_col,
+                                  title);
+}
+
+static void draw_residual_matrix_panel(const BlueprintEngine *engine, const Matrix *matrix, DVec2 origin, float cell_size, const char *title, const char *sensor_name, MatrixInspector *inspector, int selected_row, int selected_col, bool *out_hovered_cell, int *out_row, int *out_col) {
+    int hover_row = -1;
+    int hover_col = -1;
+    bool cell_hover = hover_matrix_cell_world(engine, origin, matrix->rows, matrix->cols, cell_size, &hover_row, &hover_col);
+    if (out_hovered_cell != NULL) *out_hovered_cell = cell_hover;
+    if (out_row != NULL) *out_row = hover_row;
+    if (out_col != NULL) *out_col = hover_col;
+
+    if (hover_matrix_title_screen(engine, origin, cell_size, title)) {
+        char body[320];
+        snprintf(body, sizeof(body), "Innovation covariance for %s. This panel determines expected residual spread before the update is trusted.", sensor_name);
+        set_matrix_inspector(inspector, title, body);
+    }
+    if (cell_hover) {
+        char body[320];
+        snprintf(body, sizeof(body), "%s[%s,%s] = %.3f. %s innovation covariance between measurement axes.", title, measurement_axis_label(hover_row), measurement_axis_label(hover_col), matrix_get(matrix, hover_row, hover_col), sensor_name);
+        set_matrix_inspector(inspector, title, body);
+    }
+
+    blueprint_draw_matrix_heatmap(engine, matrix, origin, cell_size, true,
+                                  selected_row, selected_col,
+                                  cell_hover ? hover_row : selected_row,
+                                  cell_hover ? hover_col : selected_col,
+                                  title);
+}
+
+static void draw_innovation_vector_panel(const BlueprintEngine *engine, const Vector *vector, DVec2 origin, float cell_size, const char *title, Color accent, const char *sensor_name, MatrixInspector *inspector, int selected_index, bool *out_hovered, int *out_index) {
+    Matrix wrapper = {vector->size, 1, vector->data};
+    int hover_row = -1;
+    int hover_col = -1;
+    bool hovered = hover_matrix_cell_world(engine, origin, wrapper.rows, wrapper.cols, cell_size, &hover_row, &hover_col);
+    if (out_hovered != NULL) *out_hovered = hovered;
+    if (out_index != NULL) *out_index = hover_row;
+
+    if (hover_matrix_title_screen(engine, origin, cell_size, title)) {
+        char body[320];
+        snprintf(body, sizeof(body), "%s residual vector. These entries are the measurement-minus-prediction mismatch that drives the %s correction.", sensor_name, sensor_name);
+        set_matrix_inspector(inspector, title, body);
+    }
+    if (hovered) {
+        char body[320];
+        snprintf(body, sizeof(body), "%s[%s] = %.3f. %s residual along measurement axis %s.", title, measurement_axis_label(hover_row), vector->data[hover_row], sensor_name, measurement_axis_label(hover_row));
+        set_matrix_inspector(inspector, title, body);
+    }
+
+    blueprint_draw_vector_visual(engine, vector, origin, cell_size, true, title, accent);
+    if (selected_index >= 0) {
+        blueprint_draw_matrix_heatmap(engine, &wrapper, origin, cell_size, true, selected_index, 0, selected_index, 0, title);
+    }
+}
+
 static bool hover_world_rect_screen(const BlueprintEngine *engine, DVec2 origin, Vector2 size) {
     Vector2 a = blueprint_world_to_screen(engine, origin);
     Vector2 b = blueprint_world_to_screen(engine, dvec2(origin.x + size.x, origin.y + size.y));
@@ -1349,12 +1426,36 @@ static void draw_fusion_scene_node(Camera2D cam) {
         linked_row = hover_row;
         linked_col = hover_col;
     }
-    blueprint_draw_kalman_gain_heatmap(engine, &g_fusion_scene->gps_internals, dvec2(900.0, 420.0), g_fusion_scene->cell_size, "K_gps");
-    blueprint_draw_kalman_gain_heatmap(engine, &g_fusion_scene->camera_internals, dvec2(1320.0, 420.0), g_fusion_scene->cell_size, "K_cam");
-    blueprint_draw_vector_visual(engine, &g_fusion_scene->gps_internals.innovation, dvec2(900.0, 120.0), g_fusion_scene->cell_size * 0.9f, true, "gps innovation", (Color){248, 176, 102, 255});
-    blueprint_draw_vector_visual(engine, &g_fusion_scene->camera_internals.innovation, dvec2(1180.0, 120.0), g_fusion_scene->cell_size * 0.9f, true, "camera innovation", (Color){196, 132, 255, 255});
-    blueprint_draw_matrix_heatmap(engine, &g_fusion_scene->gps_residual.S, dvec2(620.0, 120.0), g_fusion_scene->cell_size, true, -1, -1, -1, -1, "S_gps");
-    blueprint_draw_matrix_heatmap(engine, &g_fusion_scene->camera_residual.S, dvec2(620.0, 420.0), g_fusion_scene->cell_size, true, -1, -1, -1, -1, "S_cam");
+    draw_gain_matrix_panel(engine, &g_fusion_scene->gps_internals.K, dvec2(900.0, 420.0), g_fusion_scene->cell_size, "K_gps", "GPS", &matrix_inspector, linked_row, linked_col, &hovered_cell, &hover_row, &hover_col);
+    if (hovered_cell) {
+        linked_row = hover_row;
+        linked_col = hover_col;
+    }
+    draw_gain_matrix_panel(engine, &g_fusion_scene->camera_internals.K, dvec2(1320.0, 420.0), g_fusion_scene->cell_size, "K_cam", "Camera", &matrix_inspector, linked_row, linked_col, &hovered_cell, &hover_row, &hover_col);
+    if (hovered_cell) {
+        linked_row = hover_row;
+        linked_col = hover_col;
+    }
+    draw_innovation_vector_panel(engine, &g_fusion_scene->gps_internals.innovation, dvec2(900.0, 120.0), g_fusion_scene->cell_size * 0.9f, "gps innovation", (Color){248, 176, 102, 255}, "GPS", &matrix_inspector, linked_row, &hovered_cell, &hover_row);
+    if (hovered_cell) {
+        linked_row = hover_row;
+        linked_col = 0;
+    }
+    draw_innovation_vector_panel(engine, &g_fusion_scene->camera_internals.innovation, dvec2(1180.0, 120.0), g_fusion_scene->cell_size * 0.9f, "camera innovation", (Color){196, 132, 255, 255}, "Camera", &matrix_inspector, linked_row, &hovered_cell, &hover_row);
+    if (hovered_cell) {
+        linked_row = hover_row;
+        linked_col = 0;
+    }
+    draw_residual_matrix_panel(engine, &g_fusion_scene->gps_residual.S, dvec2(620.0, 120.0), g_fusion_scene->cell_size, "S_gps", "GPS", &matrix_inspector, linked_row, linked_col, &hovered_cell, &hover_row, &hover_col);
+    if (hovered_cell) {
+        linked_row = hover_row;
+        linked_col = hover_col;
+    }
+    draw_residual_matrix_panel(engine, &g_fusion_scene->camera_residual.S, dvec2(620.0, 420.0), g_fusion_scene->cell_size, "S_cam", "Camera", &matrix_inspector, linked_row, linked_col, &hovered_cell, &hover_row, &hover_col);
+    if (hovered_cell) {
+        linked_row = hover_row;
+        linked_col = hover_col;
+    }
     draw_interactive_covariance_timeline(engine, g_fusion_scene->covariance_history, g_fusion_scene->covariance_history_count, 5, dvec2(-1320.0, 860.0), 18.0f, &matrix_inspector, linked_row, linked_col, &hovered_cell, &hover_row, &hover_col);
     if (hovered_cell) {
         linked_row = hover_row;
