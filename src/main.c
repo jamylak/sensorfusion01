@@ -292,6 +292,7 @@ static void draw_hx_scene_node(Camera2D cam);
 static bool hover_world_rect_screen(const BlueprintEngine *engine, DVec2 origin, Vector2 size);
 static bool hover_world_rect(const BlueprintEngine *engine, DVec2 origin, Vector2 size);
 static bool hover_matrix_cell_world(const BlueprintEngine *engine, DVec2 origin, int rows, int cols, float cell_size, int *out_row, int *out_col);
+static bool hover_screen_label(Vector2 anchor, const char *text, int font_size);
 static void set_matrix_inspector(MatrixInspector *inspector, const char *title, const char *body);
 static void draw_matrix_inspector_box(const MatrixInspector *inspector);
 static void draw_math_matrix_panel(const BlueprintEngine *engine, const Matrix *matrix, DVec2 origin, float cell_size, const char *title, const char *description, MatrixInspector *inspector, int selected_row, int selected_col, int focus_row, int focus_col, bool *out_hovered, int *out_row, int *out_col);
@@ -1127,6 +1128,51 @@ static void draw_measurement_handle(const BlueprintEngine *engine, const Innovat
     DrawCircleV(p, 6.5f, color_lerp(scene->accent, WHITE, 0.18f));
 }
 
+static Color innovation_state_color(int index) {
+    static const Color colors[] = {
+        {106, 196, 255, 255},
+        {255, 182, 96, 255},
+        {116, 236, 176, 255},
+        {236, 132, 184, 255}
+    };
+    if (index < 0 || index >= 4) {
+        return (Color){220, 228, 238, 255};
+    }
+    return colors[index];
+}
+
+static Color innovation_measurement_color(int index) {
+    static const Color colors[] = {
+        {255, 220, 110, 255},
+        {186, 160, 255, 255}
+    };
+    if (index < 0 || index >= 2) {
+        return (Color){248, 210, 122, 255};
+    }
+    return colors[index];
+}
+
+static void draw_world_focus_ring(const BlueprintEngine *engine, DVec2 point, Color color, float radius) {
+    Vector2 p = blueprint_world_to_screen(engine, point);
+    DrawCircleLinesV(p, radius, color);
+    DrawCircleLinesV(p, radius + 4.0f, Fade(color, 0.75f));
+}
+
+static void draw_panel_link_box(const BlueprintEngine *engine, DVec2 origin, Vector2 size, Color color, float thickness) {
+    Vector2 a = blueprint_world_to_screen(engine, origin);
+    Vector2 b = blueprint_world_to_screen(engine, dvec2(origin.x + size.x, origin.y + size.y));
+    Rectangle rect = {a.x, a.y, b.x - a.x, b.y - a.y};
+    if (rect.width < 0.0f) {
+        rect.x += rect.width;
+        rect.width = -rect.width;
+    }
+    if (rect.height < 0.0f) {
+        rect.y += rect.height;
+        rect.height = -rect.height;
+    }
+    DrawRectangleLinesEx(rect, thickness, color);
+}
+
 static void draw_world_axes(const BlueprintEngine *engine, DVec2 origin, double half_extent, Color color) {
     blueprint_draw_arrow(engine, dvec2(origin.x - half_extent, origin.y), dvec2(origin.x + half_extent, origin.y), 1.2f, Fade(color, 0.7f));
     blueprint_draw_arrow(engine, dvec2(origin.x, origin.y + half_extent), dvec2(origin.x, origin.y - half_extent), 1.2f, Fade(color, 0.7f));
@@ -1239,6 +1285,11 @@ static void draw_innovation_scene_node(Camera2D cam) {
     DVec2 predicted = dvec2(g_innovation_scene->predicted_state.mean.data[0], g_innovation_scene->predicted_state.mean.data[1]);
     DVec2 measured = g_innovation_scene->measurement_point;
     DVec2 innovation_tip = dvec2(g_innovation_scene->innovation.innovation.data[0], g_innovation_scene->innovation.innovation.data[1]);
+    MatrixInspector inspector = {0};
+    int linked_state = -1;
+    int linked_measurement = -1;
+    int hover_row = -1;
+    int hover_col = -1;
 
     blueprint_draw_state_trajectory(engine, g_innovation_scene->true_path, g_innovation_scene->path_count, (Color){210, 220, 232, 120});
     blueprint_draw_state_trajectory(engine, g_innovation_scene->predicted_path, g_innovation_scene->path_count, (Color){112, 196, 255, 140});
@@ -1255,12 +1306,46 @@ static void draw_innovation_scene_node(Camera2D cam) {
     draw_measurement_handle(engine, g_innovation_scene, measured);
     draw_timestamp_label(engine, measured, g_innovation_scene->source_timestamp, g_innovation_scene->accent, g_innovation_scene->source_name);
 
+    if (hover_world_circle_screen(engine, truth, 12.0f)) {
+        set_matrix_inspector(&inspector, "true vehicle",
+                             "Physical vehicle position in the world. Every sensor sample and every innovation on this page is anchored back to this moving object.");
+    }
+    if (hover_world_circle_screen(engine, predicted, 12.0f)) {
+        set_matrix_inspector(&inspector, "predicted measurement anchor",
+                             "This is Hx in world coordinates: where the filter believes the GPS-like sensor should report the vehicle before seeing the actual measurement z.");
+        linked_measurement = 0;
+    }
+    if (hover_world_circle_screen(engine, measured, 14.0f)) {
+        set_matrix_inspector(&inspector, "measurement z",
+                             "Sensor measurement produced from the same physical vehicle. Dragging this point changes the observed position and directly reshapes the innovation y = z - Hx.");
+        linked_measurement = 1;
+    }
+    if (hover_world_rect(engine, dvec2(fmin(predicted.x, measured.x), fmin(predicted.y, measured.y)),
+                         (Vector2){(float)fabs(measured.x - predicted.x), (float)fabs(measured.y - predicted.y)})) {
+        set_matrix_inspector(&inspector, "innovation vector",
+                             "Geometric residual from predicted measurement Hx to actual sensor reading z. In the real filter this mismatch drives the correction step back toward the sensed vehicle.");
+    }
+
     Vector2 tp = blueprint_world_to_screen(engine, truth);
     Vector2 pp = blueprint_world_to_screen(engine, predicted);
     Vector2 mp = blueprint_world_to_screen(engine, measured);
     DrawText("true", (int)tp.x + 8, (int)tp.y - 12, 13, (Color){236, 236, 244, 255});
     DrawText("Hx", (int)pp.x + 8, (int)pp.y - 12, 13, (Color){120, 196, 255, 255});
     DrawText("z", (int)mp.x + 8, (int)mp.y - 12, 13, g_innovation_scene->accent);
+    if (hover_screen_label((Vector2){tp.x + 8.0f, tp.y - 12.0f}, "true", 13)) {
+        set_matrix_inspector(&inspector, "true",
+                             "Real vehicle position in meters. This is the physical source that the sensor is trying to observe.");
+    }
+    if (hover_screen_label((Vector2){pp.x + 8.0f, pp.y - 12.0f}, "Hx", 13)) {
+        set_matrix_inspector(&inspector, "Hx",
+                             "Predicted measurement obtained by projecting the estimated state into sensor space. It is the filter's expectation of what the sensor should see.");
+        linked_measurement = 0;
+    }
+    if (hover_screen_label((Vector2){mp.x + 8.0f, mp.y - 12.0f}, "z", 13)) {
+        set_matrix_inspector(&inspector, "z",
+                             "Actual sensor observation of the same vehicle. Its separation from Hx is the innovation.");
+        linked_measurement = 1;
+    }
 
     DVec2 algebra_origin = dvec2(1180.0, -40.0);
     DVec2 innovation_origin = dvec2(1760.0, -40.0);
@@ -1292,12 +1377,93 @@ static void draw_innovation_scene_node(Camera2D cam) {
     DrawText("y = z - Hx", (int)alg.x + 56, (int)alg.y + 62, 16, (Color){255, 236, 170, 255});
     Vector2 inv = blueprint_world_to_screen(engine, innovation_origin);
     DrawText("y", (int)inv.x + 10, (int)inv.y - 14, 14, (Color){255, 236, 170, 255});
+    if (hover_screen_label((Vector2){alg.x + 12.0f, alg.y + 12.0f}, "Hx", 14)) {
+        set_matrix_inspector(&inspector, "algebraic Hx",
+                             "The same predicted measurement, shown as a vector subtraction experiment rather than a world-space point.");
+        linked_measurement = 0;
+    }
+    if (hover_screen_label((Vector2){alg.x + 34.0f, alg.y - 14.0f}, "z", 14)) {
+        set_matrix_inspector(&inspector, "algebraic z",
+                             "The measured sensor vector. Physically it comes from the GPS-like observation of the moving vehicle.");
+        linked_measurement = 1;
+    }
+    if (hover_screen_label((Vector2){alg.x + 56.0f, alg.y + 62.0f}, "y = z - Hx", 16)) {
+        set_matrix_inspector(&inspector, "innovation equation",
+                             "Residual computation linking physics to estimation math: sensor reading minus predicted sensor reading for the same vehicle.");
+    }
+    if (hover_screen_label((Vector2){inv.x + 10.0f, inv.y - 14.0f}, "y", 14)) {
+        set_matrix_inspector(&inspector, "y",
+                             "Innovation vector by itself. This is the part of the Kalman pipeline that says how wrong the filter's sensor prediction was.");
+    }
+
+    if (hover_matrix_cell_world(engine, projection_origin, g_innovation_scene->state_vector.size, 1, g_innovation_scene->cell_size, &hover_row, &hover_col)) {
+        linked_state = hover_row;
+        set_matrix_inspector(&inspector, "state component",
+                             hover_row == 0 ? "px: estimated vehicle x-position in world meters." :
+                             hover_row == 1 ? "py: estimated vehicle y-position in world meters." :
+                             hover_row == 2 ? "vx: vehicle x-velocity, which affects future motion but not this GPS measurement directly." :
+                                              "vy: vehicle y-velocity, which affects future motion but not this GPS measurement directly.");
+    }
+    if (hover_matrix_cell_world(engine, dvec2(projection_origin.x + 280.0, projection_origin.y), g_innovation_scene->measurement_model.H.rows, g_innovation_scene->measurement_model.H.cols, g_innovation_scene->cell_size, &hover_row, &hover_col)) {
+        linked_measurement = hover_row;
+        linked_state = hover_col;
+        set_matrix_inspector(&inspector, "H cell",
+                             "This H entry says how one physical state component contributes to one sensor-space measurement component.");
+    }
+    if (hover_matrix_cell_world(engine, dvec2(projection_origin.x + 560.0, projection_origin.y + 60.0), g_innovation_scene->projected_measurement.size, 1, g_innovation_scene->cell_size, &hover_row, &hover_col)) {
+        linked_measurement = hover_row;
+        set_matrix_inspector(&inspector, "Hx component",
+                             hover_row == 0 ? "Predicted sensor x-reading generated from the vehicle state." :
+                                              "Predicted sensor y-reading generated from the vehicle state.");
+    }
 
     blueprint_draw_vector_visual(engine, &g_innovation_scene->state_vector, projection_origin, g_innovation_scene->cell_size, true, "x = [px py vx vy]^T", (Color){120, 196, 255, 255});
-    blueprint_draw_matrix_heatmap(engine, &g_innovation_scene->measurement_model.H, dvec2(projection_origin.x + 280.0, projection_origin.y), g_innovation_scene->cell_size, true, -1, -1, 0, 0, "H");
+    blueprint_draw_matrix_heatmap(engine,
+                                  &g_innovation_scene->measurement_model.H,
+                                  dvec2(projection_origin.x + 280.0, projection_origin.y),
+                                  g_innovation_scene->cell_size,
+                                  true,
+                                  linked_measurement,
+                                  linked_state,
+                                  linked_measurement >= 0 ? linked_measurement : 0,
+                                  linked_state >= 0 ? linked_state : 0,
+                                  "H");
     blueprint_draw_vector_visual(engine, &g_innovation_scene->projected_measurement, dvec2(projection_origin.x + 560.0, projection_origin.y + 60.0), g_innovation_scene->cell_size, true, "Hx", g_innovation_scene->accent);
+    if (linked_state >= 0) {
+        Matrix wrapper = {g_innovation_scene->state_vector.size, 1, g_innovation_scene->state_vector.data};
+        blueprint_draw_matrix_heatmap(engine, &wrapper, projection_origin, g_innovation_scene->cell_size, true, linked_state, 0, linked_state, 0, "x = [px py vx vy]^T");
+    }
+    if (linked_measurement >= 0) {
+        Matrix wrapper = {g_innovation_scene->projected_measurement.size, 1, g_innovation_scene->projected_measurement.data};
+        blueprint_draw_matrix_heatmap(engine, &wrapper, dvec2(projection_origin.x + 560.0, projection_origin.y + 60.0), g_innovation_scene->cell_size, true, linked_measurement, 0, linked_measurement, 0, "Hx");
+    }
     blueprint_draw_tensor_flow_edge(engine, dvec2(projection_origin.x + 70.0, projection_origin.y + 110.0), dvec2(projection_origin.x + 280.0, projection_origin.y + 80.0), (Color){120, 196, 255, 255}, "state -> sensor space", true);
     blueprint_draw_tensor_flow_edge(engine, dvec2(projection_origin.x + 440.0, projection_origin.y + 80.0), dvec2(projection_origin.x + 560.0, projection_origin.y + 110.0), g_innovation_scene->accent, "projection", true);
+    if (hover_world_rect(engine, projection_origin, (Vector2){g_innovation_scene->cell_size, g_innovation_scene->cell_size * 4.0f})) {
+        set_matrix_inspector(&inspector, "state vector x",
+                             "Estimator state for the physical vehicle: position and velocity components that generate the predicted measurement Hx.");
+    }
+    if (hover_world_rect(engine, dvec2(projection_origin.x + 280.0, projection_origin.y), (Vector2){g_innovation_scene->cell_size * 4.0f, g_innovation_scene->cell_size * 2.0f})) {
+        set_matrix_inspector(&inspector, "measurement model H",
+                             "Observation matrix mapping vehicle state into what the sensor can physically see. On this page it extracts position from the moving state.");
+    }
+    if (hover_world_rect(engine, dvec2(projection_origin.x + 560.0, projection_origin.y + 60.0), (Vector2){g_innovation_scene->cell_size, g_innovation_scene->cell_size * 2.0f})) {
+        set_matrix_inspector(&inspector, "projected Hx vector",
+                             "Predicted measurement components after applying H to the state. This is the sensor-space version of the estimated vehicle.");
+    }
+    if (hover_screen_label(blueprint_world_to_screen(engine, dvec2(projection_origin.x + 8.0, projection_origin.y - g_innovation_scene->cell_size * 0.8)), "x = [px py vx vy]^T", 16)) {
+        set_matrix_inspector(&inspector, "x = [px py vx vy]^T",
+                             "Full state of the vehicle in the physical world. The measurement model only sees part of this state.");
+    }
+    if (hover_screen_label(blueprint_world_to_screen(engine, dvec2(projection_origin.x + 280.0, projection_origin.y - g_innovation_scene->cell_size * 0.8)), "H", 16)) {
+        set_matrix_inspector(&inspector, "H",
+                             "Sensor projection operator. It turns vehicle state into expected measurement coordinates.");
+    }
+    if (hover_screen_label(blueprint_world_to_screen(engine, dvec2(projection_origin.x + 560.0, projection_origin.y + 60.0 - g_innovation_scene->cell_size * 0.8)), "Hx", 16)) {
+        set_matrix_inspector(&inspector, "vector Hx",
+                             "Expected sensor reading from the current vehicle estimate. It links the abstract matrix multiply back to a concrete point in the world.");
+        linked_measurement = 0;
+    }
 
     draw_world_axes(engine, measurement_plane_origin, 140.0, (Color){92, 110, 134, 255});
     blueprint_draw_arrow(engine, measurement_plane_origin, dvec2(measurement_plane_origin.x + y_vec.x, measurement_plane_origin.y + y_vec.y), 1.8f, (Color){255, 236, 170, 255});
@@ -1314,6 +1480,49 @@ static void draw_innovation_scene_node(Camera2D cam) {
     Vector2 mp0 = blueprint_world_to_screen(engine, measurement_plane_origin);
     DrawText("sensor measurement space", (int)mp0.x - 40, (int)mp0.y - 94, 14, (Color){212, 220, 232, 255});
     DrawText("drag z to reshape y against P^-", (int)mp0.x - 26, (int)mp0.y + 92, 13, Fade(g_innovation_scene->accent, 0.95f));
+    if (hover_screen_label((Vector2){mp0.x - 40.0f, mp0.y - 94.0f}, "sensor measurement space", 14)) {
+        set_matrix_inspector(&inspector, "measurement space",
+                             "Geometric sensor space where the world-state estimate and the actual sensor reading are compared component by component.");
+    }
+    if (hover_screen_label((Vector2){mp0.x - 26.0f, mp0.y + 92.0f}, "drag z to reshape y against P^-", 13)) {
+        set_matrix_inspector(&inspector, "interactive measurement",
+                             "Dragging the sensor reading changes the physical observation and immediately changes the innovation geometry relative to the predicted covariance.");
+    }
+
+    if (linked_state == 0 || linked_state == 1) {
+        draw_world_focus_ring(engine, predicted, innovation_state_color(linked_state), 13.0f);
+        draw_world_focus_ring(engine, truth, innovation_state_color(linked_state), 13.0f);
+        draw_panel_link_box(engine, projection_origin, (Vector2){g_innovation_scene->cell_size, g_innovation_scene->cell_size * 4.0f}, innovation_state_color(linked_state), 2.0f);
+    } else if (linked_state == 2 || linked_state == 3) {
+        DVec2 vel_from = truth;
+        DVec2 vel_to = dvec2(truth.x + g_innovation_scene->state_vector.data[2] * 0.9,
+                             truth.y + g_innovation_scene->state_vector.data[3] * 0.9);
+        blueprint_draw_signal_arrow(engine, vel_from, vel_to, 2.4f, innovation_state_color(linked_state), 0.45);
+        draw_panel_link_box(engine, projection_origin, (Vector2){g_innovation_scene->cell_size, g_innovation_scene->cell_size * 4.0f}, innovation_state_color(linked_state), 2.0f);
+    }
+    if (linked_measurement == 0) {
+        draw_world_focus_ring(engine, predicted, innovation_measurement_color(0), 18.0f);
+        draw_world_focus_ring(engine, dvec2(algebra_origin.x + hx_vec.x, algebra_origin.y + hx_vec.y), innovation_measurement_color(0), 12.0f);
+        draw_world_focus_ring(engine, dvec2(measurement_plane_origin.x + hx_vec.x * 0.7, measurement_plane_origin.y + hx_vec.y * 0.7), innovation_measurement_color(0), 12.0f);
+        draw_panel_link_box(engine, dvec2(projection_origin.x + 560.0, projection_origin.y + 60.0), (Vector2){g_innovation_scene->cell_size, g_innovation_scene->cell_size * 2.0f}, innovation_measurement_color(0), 2.2f);
+    } else if (linked_measurement == 1) {
+        draw_world_focus_ring(engine, measured, innovation_measurement_color(1), 18.0f);
+        draw_world_focus_ring(engine, dvec2(algebra_origin.x + z_vec.x, algebra_origin.y + z_vec.y), innovation_measurement_color(1), 12.0f);
+        draw_world_focus_ring(engine, dvec2(measurement_plane_origin.x + z_vec.x * 0.7, measurement_plane_origin.y + z_vec.y * 0.7), innovation_measurement_color(1), 12.0f);
+    }
+    if (linked_state >= 0 && linked_measurement >= 0) {
+        DVec2 x_cell = dvec2(projection_origin.x + g_innovation_scene->cell_size * 0.5,
+                             projection_origin.y + linked_state * g_innovation_scene->cell_size + g_innovation_scene->cell_size * 0.5);
+        DVec2 h_cell = dvec2(projection_origin.x + 280.0 + linked_state * g_innovation_scene->cell_size + g_innovation_scene->cell_size * 0.5,
+                             projection_origin.y + linked_measurement * g_innovation_scene->cell_size + g_innovation_scene->cell_size * 0.5);
+        DVec2 hx_cell = dvec2(projection_origin.x + 560.0 + g_innovation_scene->cell_size * 0.5,
+                              projection_origin.y + 60.0 + linked_measurement * g_innovation_scene->cell_size + g_innovation_scene->cell_size * 0.5);
+        Color link_color = color_lerp(innovation_state_color(linked_state), innovation_measurement_color(linked_measurement), 0.5f);
+        blueprint_draw_signal_arrow(engine, x_cell, h_cell, 1.6f, link_color, 0.12);
+        blueprint_draw_signal_arrow(engine, h_cell, hx_cell, 1.6f, link_color, 0.24);
+    }
+
+    draw_matrix_inspector_box(&inspector);
 }
 
 static void set_h_preset(HSceneData *scene, int mode) {
@@ -2398,6 +2607,19 @@ static bool hover_world_rect_screen(const BlueprintEngine *engine, DVec2 origin,
         rect.y += rect.height;
         rect.height = -rect.height;
     }
+    return CheckCollisionPointRec(GetMousePosition(), rect);
+}
+
+static bool hover_screen_label(Vector2 anchor, const char *text, int font_size) {
+    if (text == NULL) {
+        return false;
+    }
+    Rectangle rect = {
+        anchor.x - 3.0f,
+        anchor.y - 2.0f,
+        (float)MeasureText(text, font_size) + 6.0f,
+        (float)font_size + 6.0f
+    };
     return CheckCollisionPointRec(GetMousePosition(), rect);
 }
 
