@@ -207,6 +207,10 @@ typedef struct {
     bool quit_requested;
     double time_seconds;
     double signal_phase;
+    bool minimap_highlight_active;
+    DVec2 minimap_highlight_min;
+    DVec2 minimap_highlight_max;
+    Color minimap_highlight_color;
 } BlueprintEngine;
 
 typedef struct {
@@ -259,6 +263,7 @@ void blueprint_engine_draw(BlueprintEngine *engine);
 void blueprint_engine_add_node(BlueprintEngine *engine, const BlueprintNode *node);
 
 void blueprint_init_demo(BlueprintEngine *engine);
+void blueprint_reset_demo(BlueprintEngine *engine);
 
 Camera2D blueprint_camera_snapshot(const BlueprintEngine *engine);
 DVec2 blueprint_screen_to_world(const BlueprintEngine *engine, Vector2 screen);
@@ -267,6 +272,8 @@ float blueprint_world_length_to_screen(const BlueprintEngine *engine, double len
 DVec2 blueprint_node_origin(void);
 const BlueprintEngine *blueprint_active_engine(void);
 const BlueprintNode *blueprint_active_node(void);
+void blueprint_clear_minimap_highlight(BlueprintEngine *engine);
+void blueprint_set_minimap_highlight(BlueprintEngine *engine, DVec2 min, DVec2 max, Color color);
 bool blueprint_world_rect_visible(const BlueprintEngine *engine, DVec2 min, DVec2 max, double padding);
 bool blueprint_world_segment_visible(const BlueprintEngine *engine, DVec2 a, DVec2 b, double padding);
 bool blueprint_world_point_visible(const BlueprintEngine *engine, DVec2 point, double padding);

@@ -279,7 +279,19 @@ static void evaluate_vehicle_state(int vehicle_id, double t, double *x, double *
     *vy = 56.7 * cos(t * 0.27 + phase * 0.6) - 13.2 * sin(t * 0.11 + vehicle_id * 0.4);
 }
 
-static bool graph_add_state_node(FusionSceneData *scene, int vehicle_id, int node_id, double t, double x, double y, double vx, double vy) {
+static Vector2 graph_lane_position(int vehicle_id, int sample_index) {
+    float x = -2260.0f + (float)sample_index * 17.0f;
+    float y = 1720.0f + (float)vehicle_id * 260.0f;
+    return (Vector2){x, y};
+}
+
+static Vector2 graph_anchor_position(int vehicle_id, int sample_index) {
+    float x = -2260.0f + (float)sample_index * 17.0f;
+    float y = 1460.0f + (float)vehicle_id * 48.0f;
+    return (Vector2){x, y};
+}
+
+static bool graph_add_state_node(FusionSceneData *scene, int vehicle_id, int node_id, Vector2 world_position, double t, double x, double y, double vx, double vy) {
     Vector state = {0};
     Matrix covariance = {0};
     bool ok = false;
@@ -296,7 +308,7 @@ static bool graph_add_state_node(FusionSceneData *scene, int vehicle_id, int nod
     matrix_set(&covariance, 1, 0, matrix_get(&covariance, 0, 1));
     matrix_set(&covariance, 1, 1, 150.0 + vehicle_id * 24.0 + fabs(cos(t * 0.28 + vehicle_id * 0.7)) * 90.0);
 
-    ok = factor_graph_add_node(&scene->factor_graph, node_id, &state, &covariance, (Vector2){(float)x, (float)y}) != NULL;
+    ok = factor_graph_add_node(&scene->factor_graph, node_id, &state, &covariance, world_position) != NULL;
 cleanup:
     vector_free_storage(&state);
     matrix_free_storage(&covariance);
@@ -342,8 +354,9 @@ static void append_factor_graph_samples(FusionSceneData *scene, double t) {
             double y = 0.0;
             double vx = 0.0;
             double vy = 0.0;
+            Vector2 lane_position = graph_lane_position(vehicle, sample_index);
             evaluate_vehicle_state(vehicle, sample_t, &x, &y, &vx, &vy);
-            if (!graph_add_state_node(scene, vehicle, node_id, sample_t, x, y, vx, vy)) {
+            if (!graph_add_state_node(scene, vehicle, node_id, lane_position, sample_t, x, y, vx, vy)) {
                 return;
             }
 
@@ -373,7 +386,8 @@ static void append_factor_graph_samples(FusionSceneData *scene, double t) {
                 int anchor_id = scene->next_anchor_id++;
                 double gps_x = x + 34.0 * sin(sample_t * 0.33 + vehicle);
                 double gps_y = y + 30.0 * cos(sample_t * 0.27 + vehicle * 0.7);
-                if (graph_add_state_node(scene, -1, anchor_id, sample_t, gps_x, gps_y, 0.0, 0.0)) {
+                Vector2 anchor_position = graph_anchor_position(vehicle, sample_index);
+                if (graph_add_state_node(scene, -1, anchor_id, anchor_position, sample_t, gps_x, gps_y, 0.0, 0.0)) {
                     graph_add_measurement_edge(scene, node_id, anchor_id,
                                                gps_x - x,
                                                gps_y - y,
@@ -852,9 +866,9 @@ static void draw_fusion_scene_node(Camera2D cam) {
     blueprint_draw_equation_block(engine, dvec2(-1320.0, -540.0), "multi-sensor fusion pipeline", lines, 3, (Color){236, 242, 249, 255});
     {
         const char *graph_lines[] = {
-            "Trajectory chains carry dense IMU and visual-odometry constraints between consecutive states",
-            "Periodic GPS anchors, loop closures, and cross-vehicle links remain explicit as matrix-valued factor edges",
-            "Pan south-east from the local filter view to inspect the large-scale graph and per-node covariance structure"
+            "Vehicle states are arranged in fixed left-to-right lanes so graph structure stays readable as factors accumulate",
+            "GPS anchors occupy a separate upper band; loop closures and cross-vehicle constraints span between stable rows",
+            "Zoom in to inspect covariance panels and matrix-valued factors without losing the global graph topology"
         };
         blueprint_draw_equation_block(engine, dvec2(-2320.0, 1320.0), "large-scale estimation graph", graph_lines, 3, (Color){232, 238, 246, 255});
     }
@@ -1061,6 +1075,18 @@ void blueprint_init_demo(BlueprintEngine *engine) {
     }
     add_node(engine, "math-scene", BLUEPRINT_LAYER_MATH, 0, draw_math_scene_node, g_math_scene->scene_min, g_math_scene->scene_max);
     add_node(engine, "fusion-scene", BLUEPRINT_LAYER_MATH, 1, draw_fusion_scene_node, g_fusion_scene->scene_min, g_fusion_scene->scene_max);
+}
+
+void blueprint_reset_demo(BlueprintEngine *engine) {
+    (void)engine;
+    destroy_fusion_scene(g_fusion_scene);
+    destroy_math_scene(g_math_scene);
+    g_fusion_scene = create_fusion_scene();
+    g_math_scene = create_math_scene();
+    if (g_math_scene == NULL || g_fusion_scene == NULL) {
+        fprintf(stderr, "failed to reset demo scenes\n");
+        exit(1);
+    }
 }
 
 int main(void) {

@@ -195,6 +195,19 @@ static void draw_minimap(const BlueprintEngine *engine) {
     center.x = clampf(center.x, map_rect.x, map_rect.x + map_rect.width);
     center.y = clampf(center.y, map_rect.y, map_rect.y + map_rect.height);
     DrawCircleV(center, 3.0f, (Color){244, 196, 96, 255});
+    if (engine->minimap_highlight_active) {
+        Vector2 ha = minimap_world_to_screen(map_rect, world_min, world_max, engine->minimap_highlight_min);
+        Vector2 hb = minimap_world_to_screen(map_rect, world_min, world_max, engine->minimap_highlight_max);
+        float hx = clampf(fminf(ha.x, hb.x), map_rect.x, map_rect.x + map_rect.width);
+        float hy = clampf(fminf(ha.y, hb.y), map_rect.y, map_rect.y + map_rect.height);
+        float hw = fabsf(hb.x - ha.x);
+        float hh = fabsf(hb.y - ha.y);
+        if (hw < 4.0f) hw = 4.0f;
+        if (hh < 4.0f) hh = 4.0f;
+        if (hx + hw > map_rect.x + map_rect.width) hw = map_rect.x + map_rect.width - hx;
+        if (hy + hh > map_rect.y + map_rect.height) hh = map_rect.y + map_rect.height - hy;
+        DrawRectangleLinesEx((Rectangle){hx, hy, hw, hh}, 2.0f, engine->minimap_highlight_color);
+    }
     DrawText("map", (int)map_rect.x + 8, (int)map_rect.y + 6, 12, (Color){206, 218, 235, 255});
 }
 
@@ -214,6 +227,23 @@ const BlueprintEngine *blueprint_active_engine(void) {
 
 const BlueprintNode *blueprint_active_node(void) {
     return g_active_node;
+}
+
+void blueprint_clear_minimap_highlight(BlueprintEngine *engine) {
+    if (engine == NULL) {
+        return;
+    }
+    engine->minimap_highlight_active = false;
+}
+
+void blueprint_set_minimap_highlight(BlueprintEngine *engine, DVec2 min, DVec2 max, Color color) {
+    if (engine == NULL) {
+        return;
+    }
+    engine->minimap_highlight_active = true;
+    engine->minimap_highlight_min = min;
+    engine->minimap_highlight_max = max;
+    engine->minimap_highlight_color = color;
 }
 
 bool blueprint_world_rect_visible(const BlueprintEngine *engine, DVec2 min, DVec2 max, double padding) {
@@ -369,7 +399,12 @@ static void handle_camera_input(BlueprintEngine *engine) {
     if (IsKeyPressed(KEY_ONE)) engine->active_page = 0;
     if (IsKeyPressed(KEY_TWO)) engine->active_page = 1;
     if (IsKeyPressed(KEY_SPACE)) engine->paused = !engine->paused;
-    if (IsKeyPressed(KEY_R)) blueprint_engine_reset(engine, GetScreenWidth(), GetScreenHeight());
+    if (IsKeyPressed(KEY_R)) {
+        int page = engine->active_page;
+        blueprint_engine_reset(engine, GetScreenWidth(), GetScreenHeight());
+        engine->active_page = page;
+        blueprint_reset_demo(engine);
+    }
     if (IsKeyPressed(KEY_Q)) engine->quit_requested = true;
 
     if (engine->active_page == 0) {
@@ -657,6 +692,7 @@ static void draw_node_layer(BlueprintEngine *engine, BlueprintLayer layer) {
 
 void blueprint_engine_draw(BlueprintEngine *engine) {
     g_engine = engine;
+    blueprint_clear_minimap_highlight(engine);
 
     BeginDrawing();
     ClearBackground((Color){8, 11, 16, 255});

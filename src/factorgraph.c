@@ -11,6 +11,12 @@ typedef struct {
     Color edge_color;
 } TrackPalette;
 
+typedef struct {
+    bool active;
+    char text[256];
+    Vector2 screen_position;
+} HoverTooltip;
+
 static DVec2 dvec2(double x, double y) {
     DVec2 v = {x, y};
     return v;
@@ -70,25 +76,111 @@ static int vehicle_for_node(int node_id, const VehicleTrack *tracks, int track_c
     return -1;
 }
 
-static void draw_state_vector_panel(const BlueprintEngine *engine, const FactorNode *node, DVec2 origin, Color accent) {
-    blueprint_draw_vector_visual(engine, &node->state, origin, 12.0f, false, NULL, accent);
+static bool matrix_hover_cell(const BlueprintEngine *engine, DVec2 origin, int rows, int cols, double cell_size, int *out_row, int *out_col) {
+    DVec2 mouse = blueprint_screen_to_world(engine, GetMousePosition());
+    if (mouse.x < origin.x || mouse.y < origin.y ||
+        mouse.x >= origin.x + cols * cell_size || mouse.y >= origin.y + rows * cell_size) {
+        return false;
+    }
+    *out_col = (int)((mouse.x - origin.x) / cell_size);
+    *out_row = (int)((mouse.y - origin.y) / cell_size);
+    return *out_row >= 0 && *out_row < rows && *out_col >= 0 && *out_col < cols;
 }
 
-static void draw_covariance_panel(const BlueprintEngine *engine, const FactorNode *node, DVec2 origin, Color accent) {
-    if (node->covariance.rows < 2 || node->covariance.cols < 2) {
+static void set_tooltip(HoverTooltip *tooltip, const char *text) {
+    if (tooltip == NULL || tooltip->active || text == NULL) {
         return;
     }
-    blueprint_draw_matrix_heatmap(engine, &node->covariance, origin, 12.0f, false, -1, -1, -1, -1, NULL);
-    blueprint_draw_matrix_grid(engine, origin, node->covariance.rows, node->covariance.cols, 12.0, Fade(accent, 0.8f), 0.8f);
+    tooltip->active = true;
+    tooltip->screen_position = GetMousePosition();
+    strncpy(tooltip->text, text, sizeof(tooltip->text) - 1);
 }
 
-static void draw_factor_node(const BlueprintEngine *engine, const FactorNode *node, int vehicle_id) {
+static void draw_tooltip_panel(const HoverTooltip *tooltip) {
+    if (tooltip == NULL || !tooltip->active) {
+        return;
+    }
+    int width = MeasureText(tooltip->text, 13) + 18;
+    int x = (int)tooltip->screen_position.x + 14;
+    int y = (int)tooltip->screen_position.y + 14;
+    DrawRectangle(x, y, width, 24, Fade((Color){10, 14, 20, 255}, 0.95f));
+    DrawRectangleLines(x, y, width, 24, (Color){112, 132, 156, 255});
+    DrawText(tooltip->text, x + 8, y + 6, 13, (Color){230, 236, 244, 255});
+}
+
+static void draw_hoverable_matrix(const BlueprintEngine *engine, const Matrix *matrix, DVec2 origin, float cell_size, Color accent, const char *title, const char *const *row_labels, const char *const *col_labels, const char *tooltip_prefix, HoverTooltip *tooltip) {
+    int hover_row = -1;
+    int hover_col = -1;
+    matrix_hover_cell(engine, origin, matrix->rows, matrix->cols, cell_size, &hover_row, &hover_col);
+    blueprint_draw_matrix_heatmap(engine, matrix, origin, cell_size, engine->camera.zoom >= 0.34, -1, -1, hover_row, hover_col, title);
+    blueprint_draw_matrix_grid(engine, origin, matrix->rows, matrix->cols, cell_size, Fade(accent, 0.75f), 0.9f);
+    if (hover_row >= 0 && hover_col >= 0) {
+        char text[256];
+        const char *row_name = row_labels != NULL ? row_labels[hover_row] : "row";
+        const char *col_name = col_labels != NULL ? col_labels[hover_col] : "col";
+        snprintf(text, sizeof(text), "%s %s,%s = %.3f", tooltip_prefix, row_name, col_name, matrix_get(matrix, hover_row, hover_col));
+        set_tooltip(tooltip, text);
+    }
+}
+
+static void draw_hoverable_vector(const BlueprintEngine *engine, const Vector *vector, DVec2 origin, float cell_size, Color accent, const char *title, const char *const *row_labels, const char *tooltip_prefix, HoverTooltip *tooltip) {
+    Matrix wrapper = {vector->size, 1, vector->data};
+    static const char *col_label[] = {"value"};
+    draw_hoverable_matrix(engine, &wrapper, origin, cell_size, accent, title, row_labels, col_label, tooltip_prefix, tooltip);
+}
+
+static void vehicle_bounds(const FactorGraph *graph, const VehicleTrack *tracks, int track_count, int vehicle_id, DVec2 *out_min, DVec2 *out_max) {
+    bool found = false;
+    for (int i = 0; i < graph->node_count; ++i) {
+        int node_vehicle = vehicle_for_node(graph->nodes[i].id, tracks, track_count);
+        if (node_vehicle != vehicle_id) {
+            continue;
+        }
+        DVec2 p = dvec2(graph->nodes[i].world_position.x, graph->nodes[i].world_position.y);
+        if (!found) {
+            *out_min = p;
+            *out_max = p;
+            found = true;
+            continue;
+        }
+        if (p.x < out_min->x) out_min->x = p.x;
+        if (p.y < out_min->y) out_min->y = p.y;
+        if (p.x > out_max->x) out_max->x = p.x;
+        if (p.y > out_max->y) out_max->y = p.y;
+    }
+    if (!found) {
+        *out_min = dvec2(0.0, 0.0);
+        *out_max = dvec2(0.0, 0.0);
+    }
+}
+
+static float point_segment_distance(Vector2 p, Vector2 a, Vector2 b) {
+    float abx = b.x - a.x;
+    float aby = b.y - a.y;
+    float apx = p.x - a.x;
+    float apy = p.y - a.y;
+    float denom = abx * abx + aby * aby;
+    float t = denom > 1e-6f ? (apx * abx + apy * aby) / denom : 0.0f;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    float cx = a.x + abx * t;
+    float cy = a.y + aby * t;
+    float dx = p.x - cx;
+    float dy = p.y - cy;
+    return sqrtf(dx * dx + dy * dy);
+}
+
+static void draw_factor_node(const BlueprintEngine *engine, const FactorNode *node, int vehicle_id, int highlighted_vehicle, HoverTooltip *tooltip) {
+    static const char *state_labels[] = {"px", "py", "vx", "vy"};
+    static const char *cov_labels[] = {"px", "py"};
     const TrackPalette *palette = palette_for_vehicle(vehicle_id);
     DVec2 center = dvec2(node->world_position.x, node->world_position.y);
     if (!blueprint_world_point_visible(engine, center, 80.0)) {
         return;
     }
 
+    Color node_color = highlighted_vehicle >= 0 && vehicle_id != highlighted_vehicle ? Fade(palette->node_color, 0.35f) : palette->node_color;
+    Color path_color = highlighted_vehicle >= 0 && vehicle_id != highlighted_vehicle ? Fade(palette->path_color, 0.25f) : Fade(palette->path_color, 0.82f);
     if (node->covariance.rows >= 2 && node->covariance.cols >= 2) {
         CovarianceData cov = {
             matrix_get(&node->covariance, 0, 0),
@@ -96,28 +188,23 @@ static void draw_factor_node(const BlueprintEngine *engine, const FactorNode *no
             matrix_get(&node->covariance, 1, 1),
             1.8
         };
-        blueprint_draw_covariance_ellipse(engine, center, &cov, Fade(palette->path_color, 0.75f));
+        blueprint_draw_covariance_ellipse(engine, center, &cov, path_color);
     }
 
     Vector2 p = blueprint_world_to_screen(engine, center);
-    DrawCircleV(p, 3.5f, palette->node_color);
+    DrawCircleV(p, highlighted_vehicle == vehicle_id ? 4.8f : 3.5f, node_color);
 
-    DVec2 state_origin = dvec2(center.x + 18.0, center.y - 32.0);
-    DVec2 cov_origin = dvec2(center.x + 18.0, center.y + 6.0);
-    draw_state_vector_panel(engine, node, state_origin, palette->node_color);
-    draw_covariance_panel(engine, node, cov_origin, palette->node_color);
+    if (engine->camera.zoom >= 0.16) {
+        DVec2 state_origin = dvec2(center.x + 18.0, center.y - 32.0);
+        DVec2 cov_origin = dvec2(center.x + 18.0, center.y + 6.0);
+        draw_hoverable_vector(engine, &node->state, state_origin, 12.0f, node_color, "state", state_labels, "state", tooltip);
+        draw_hoverable_matrix(engine, &node->covariance, cov_origin, 12.0f, node_color, "cov", cov_labels, cov_labels, "cov", tooltip);
+    }
 }
 
-static void draw_information_panel(const BlueprintEngine *engine, const FactorEdge *edge, DVec2 origin, Color accent) {
-    blueprint_draw_matrix_heatmap(engine, &edge->information_matrix, origin, 10.0f, false, -1, -1, -1, -1, NULL);
-    blueprint_draw_matrix_grid(engine, origin, edge->information_matrix.rows, edge->information_matrix.cols, 10.0, Fade(accent, 0.8f), 0.8f);
-}
-
-static void draw_residual_vector(const BlueprintEngine *engine, const FactorEdge *edge, DVec2 origin, Color accent) {
-    blueprint_draw_vector_visual(engine, &edge->residual, origin, 10.0f, false, NULL, accent);
-}
-
-static void draw_factor_edge(const BlueprintEngine *engine, const FactorGraph *graph, const FactorEdge *edge, const VehicleTrack *tracks, int track_count) {
+static void draw_factor_edge(const BlueprintEngine *engine, const FactorGraph *graph, const FactorEdge *edge, const VehicleTrack *tracks, int track_count, int highlighted_vehicle, HoverTooltip *tooltip) {
+    static const char *state_labels[] = {"px", "py", "vx", "vy"};
+    static const char *meas_labels[] = {"mx", "my"};
     const FactorNode *from = find_node(graph, edge->from_node);
     const FactorNode *to = find_node(graph, edge->to_node);
     if (from == NULL || to == NULL) {
@@ -131,6 +218,11 @@ static void draw_factor_edge(const BlueprintEngine *engine, const FactorGraph *g
     }
 
     int vehicle_id = vehicle_for_node(edge->from_node, tracks, track_count);
+    int target_vehicle_id = vehicle_for_node(edge->to_node, tracks, track_count);
+    bool local_chain = vehicle_id >= 0 && vehicle_id == target_vehicle_id && abs(edge->to_node - edge->from_node) == 1;
+    if (local_chain && engine->camera.zoom < 0.14) {
+        return;
+    }
     const TrackPalette *palette = palette_for_vehicle(vehicle_id);
     double info_trace = 0.0;
     int diag_count = edge->information_matrix.rows < edge->information_matrix.cols ? edge->information_matrix.rows : edge->information_matrix.cols;
@@ -138,14 +230,16 @@ static void draw_factor_edge(const BlueprintEngine *engine, const FactorGraph *g
         info_trace += matrix_get(&edge->information_matrix, i, i);
     }
     float thickness = 1.2f + (float)fmin(info_trace * 0.012, 2.8);
-    blueprint_draw_directed_edge(engine, a, b, thickness, palette->edge_color, true);
+    Color edge_color = highlighted_vehicle >= 0 && vehicle_id != highlighted_vehicle ? Fade(palette->edge_color, 0.22f) : palette->edge_color;
+    blueprint_draw_directed_edge(engine, a, b, thickness, edge_color, !local_chain);
 
-    DVec2 mid = dvec2((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
-    draw_residual_vector(engine, edge, dvec2(mid.x + 12.0, mid.y - 20.0), palette->edge_color);
-    draw_information_panel(engine, edge, dvec2(mid.x + 12.0, mid.y + 14.0), palette->edge_color);
-
-    if (edge->measurement_model.rows > 0 && edge->measurement_model.cols > 0) {
-        blueprint_draw_matrix_heatmap(engine, &edge->measurement_model, dvec2(mid.x - 40.0, mid.y - 28.0), 8.0f, false, -1, -1, -1, -1, NULL);
+    if (engine->camera.zoom >= 0.18) {
+        DVec2 mid = dvec2((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+        draw_hoverable_vector(engine, &edge->residual, dvec2(mid.x + 12.0, mid.y - 20.0), 10.0f, edge_color, "r", meas_labels, "residual", tooltip);
+        draw_hoverable_matrix(engine, &edge->information_matrix, dvec2(mid.x + 12.0, mid.y + 14.0), 10.0f, edge_color, "Omega", meas_labels, meas_labels, "info", tooltip);
+        if (edge->measurement_model.rows > 0 && edge->measurement_model.cols > 0) {
+            draw_hoverable_matrix(engine, &edge->measurement_model, dvec2(mid.x - 40.0, mid.y - 28.0), 8.0f, edge_color, "H", meas_labels, state_labels, "model", tooltip);
+        }
     }
 }
 
@@ -221,6 +315,8 @@ bool factor_graph_add_loop_closure(FactorGraph *graph, int from_node, int to_nod
 }
 
 void blueprint_draw_large_factor_graph(const BlueprintEngine *engine, const FactorGraph *graph, const VehicleTrack *tracks, int track_count, const char *title) {
+    HoverTooltip tooltip = {0};
+    int highlighted_vehicle = -1;
     if (engine == NULL || graph == NULL) {
         return;
     }
@@ -229,6 +325,54 @@ void blueprint_draw_large_factor_graph(const BlueprintEngine *engine, const Fact
         const FactorNode *root = &graph->nodes[0];
         Vector2 p = blueprint_world_to_screen(engine, dvec2(root->world_position.x, root->world_position.y - 120.0f));
         DrawText(title, (int)p.x, (int)p.y, 16, (Color){228, 236, 244, 255});
+        DrawText("lane layout: local chains run left-to-right, GPS anchors sit above, cross-links span lanes", (int)p.x, (int)p.y + 18, 12, (Color){164, 176, 194, 255});
+    }
+
+    for (int i = 0; i < track_count; ++i) {
+        if (tracks[i].start_node < 0 || tracks[i].end_node < tracks[i].start_node) {
+            continue;
+        }
+        const FactorNode *start = find_node(graph, tracks[i].start_node);
+        const FactorNode *end = find_node(graph, tracks[i].end_node);
+        if (start == NULL || end == NULL) {
+            continue;
+        }
+        const TrackPalette *palette = palette_for_vehicle(tracks[i].vehicle_id);
+        DVec2 lane_a = dvec2(start->world_position.x - 28.0, start->world_position.y);
+        DVec2 lane_b = dvec2(end->world_position.x + 28.0, end->world_position.y);
+        if (blueprint_world_segment_visible(engine, lane_a, lane_b, 80.0)) {
+            Vector2 sa = blueprint_world_to_screen(engine, lane_a);
+            Vector2 sb = blueprint_world_to_screen(engine, lane_b);
+            Vector2 mouse = GetMousePosition();
+            bool lane_near = point_segment_distance(mouse, sa, sb) <= 18.0f;
+            DrawLineEx(sa, sb, 1.0f, Fade(palette->path_color, 0.35f));
+            Vector2 lp = blueprint_world_to_screen(engine, dvec2(start->world_position.x - 120.0, start->world_position.y - 18.0));
+            char label[48];
+            snprintf(label, sizeof(label), "vehicle %d", tracks[i].vehicle_id);
+            int label_width = MeasureText(label, 13) + 12;
+            Rectangle label_rect = {(float)lp.x - 6.0f, (float)lp.y - 3.0f, (float)label_width, 20.0f};
+            bool hovered = CheckCollisionPointRec(mouse, label_rect);
+            bool show_label = engine->camera.zoom >= 0.11 || hovered || lane_near;
+            if (hovered) {
+                DVec2 min;
+                DVec2 max;
+                highlighted_vehicle = tracks[i].vehicle_id;
+                vehicle_bounds(graph, tracks, track_count, highlighted_vehicle, &min, &max);
+                blueprint_set_minimap_highlight((BlueprintEngine *)engine, dvec2(min.x - 50.0, min.y - 50.0), dvec2(max.x + 50.0, max.y + 50.0), palette->node_color);
+                set_tooltip(&tooltip, label);
+            }
+            if (show_label) {
+                DrawRectangleRounded(label_rect, 0.2f, 4, hovered ? Fade(palette->path_color, 0.22f) : Fade((Color){18, 24, 32, 255}, 0.72f));
+                DrawRectangleRoundedLinesEx(label_rect, 0.2f, 4, hovered ? 1.8f : 1.0f, hovered ? palette->node_color : Fade(palette->path_color, 0.45f));
+                DrawText(label, (int)lp.x, (int)lp.y, 13, palette->node_color);
+            }
+
+            if (end != NULL) {
+                Vector2 end_p = blueprint_world_to_screen(engine, dvec2(end->world_position.x, end->world_position.y));
+                float pulse = 6.0f + 2.0f * sinf((float)engine->time_seconds * 4.0f + (float)i);
+                DrawCircleLines((int)end_p.x, (int)end_p.y, pulse, palette->node_color);
+            }
+        }
     }
 
     for (int i = 0; i < track_count; ++i) {
@@ -254,11 +398,13 @@ void blueprint_draw_large_factor_graph(const BlueprintEngine *engine, const Fact
     }
 
     for (int i = 0; i < graph->edge_count; ++i) {
-        draw_factor_edge(engine, graph, &graph->edges[i], tracks, track_count);
+        draw_factor_edge(engine, graph, &graph->edges[i], tracks, track_count, highlighted_vehicle, &tooltip);
     }
 
     for (int i = 0; i < graph->node_count; ++i) {
         int vehicle_id = vehicle_for_node(graph->nodes[i].id, tracks, track_count);
-        draw_factor_node(engine, &graph->nodes[i], vehicle_id);
+        draw_factor_node(engine, &graph->nodes[i], vehicle_id, highlighted_vehicle, &tooltip);
     }
+
+    draw_tooltip_panel(&tooltip);
 }
