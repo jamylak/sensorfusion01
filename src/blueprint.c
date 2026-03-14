@@ -375,6 +375,10 @@ static void draw_top_bar(BlueprintEngine *engine) {
 
     Rectangle tab1 = {12, 8, 54, 28};
     Rectangle tab2 = {72, 8, 54, 28};
+    Rectangle tab3 = {132, 8, 54, 28};
+    Rectangle tab4 = {192, 8, 54, 28};
+    Rectangle tab5 = {252, 8, 54, 28};
+    Rectangle tab6 = {312, 8, 54, 28};
     Vector2 mouse = GetMousePosition();
 
     if (CheckCollisionPointRec(mouse, tab1) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
@@ -383,13 +387,33 @@ static void draw_top_bar(BlueprintEngine *engine) {
     if (CheckCollisionPointRec(mouse, tab2) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         engine->active_page = 1;
     }
+    if (CheckCollisionPointRec(mouse, tab3) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        engine->active_page = 2;
+    }
+    if (CheckCollisionPointRec(mouse, tab4) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        engine->active_page = 3;
+    }
+    if (CheckCollisionPointRec(mouse, tab5) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        engine->active_page = 4;
+    }
+    if (CheckCollisionPointRec(mouse, tab6) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        engine->active_page = 5;
+    }
 
     DrawRectangleRounded(tab1, 0.2f, 4, engine->active_page == 0 ? active : inactive);
     DrawRectangleRounded(tab2, 0.2f, 4, engine->active_page == 1 ? active : inactive);
+    DrawRectangleRounded(tab3, 0.2f, 4, engine->active_page == 2 ? active : inactive);
+    DrawRectangleRounded(tab4, 0.2f, 4, engine->active_page == 3 ? active : inactive);
+    DrawRectangleRounded(tab5, 0.2f, 4, engine->active_page == 4 ? active : inactive);
+    DrawRectangleRounded(tab6, 0.2f, 4, engine->active_page == 5 ? active : inactive);
     DrawText("[1]", 24, 15, 14, engine->active_page == 0 ? bar_color : BLACK);
     DrawText("[2]", 84, 15, 14, engine->active_page == 1 ? bar_color : BLACK);
+    DrawText("[3]", 144, 15, 14, engine->active_page == 2 ? bar_color : BLACK);
+    DrawText("[4]", 204, 15, 14, engine->active_page == 3 ? bar_color : BLACK);
+    DrawText("[5]", 264, 15, 14, engine->active_page == 4 ? bar_color : BLACK);
+    DrawText("[6]", 324, 15, 14, engine->active_page == 5 ? bar_color : BLACK);
 
-    DrawText("Space pause/resume  R reset  Q quit  Drag pan  Wheel zoom  HJKL nudge", 148, 15, 14, (Color){205, 215, 230, 255});
+    DrawText("Space pause/resume  R reset  Q quit  Drag pan  Wheel zoom  HJKL nudge", 388, 15, 14, (Color){205, 215, 230, 255});
 }
 
 static void draw_debug_overlay(const BlueprintEngine *engine) {
@@ -409,6 +433,10 @@ static void handle_camera_input(BlueprintEngine *engine) {
 
     if (IsKeyPressed(KEY_ONE)) engine->active_page = 0;
     if (IsKeyPressed(KEY_TWO)) engine->active_page = 1;
+    if (IsKeyPressed(KEY_THREE)) engine->active_page = 2;
+    if (IsKeyPressed(KEY_FOUR)) engine->active_page = 3;
+    if (IsKeyPressed(KEY_FIVE)) engine->active_page = 4;
+    if (IsKeyPressed(KEY_SIX)) engine->active_page = 5;
     if (IsKeyPressed(KEY_SPACE)) engine->paused = !engine->paused;
     if (IsKeyPressed(KEY_R)) {
         int page = engine->active_page;
@@ -418,7 +446,7 @@ static void handle_camera_input(BlueprintEngine *engine) {
     }
     if (IsKeyPressed(KEY_Q)) engine->quit_requested = true;
 
-    if (engine->active_page == 0 || engine->active_page == 1) {
+    if (engine->active_page >= 0 && engine->active_page <= 5) {
         handle_minimap_input(engine, mouse);
     }
 
@@ -448,7 +476,8 @@ static void handle_camera_input(BlueprintEngine *engine) {
         engine->camera.target_goal_y -= (double)delta.y / engine->camera.zoom_goal;
     }
 
-    if (mouse_in_view && !mouse_in_minimap && IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+    if (mouse_in_view && !mouse_in_minimap && IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
+        !IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !blueprint_scene_blocks_pan(engine, mouse)) {
         Vector2 delta = GetMouseDelta();
         if (!CheckCollisionPointRec(mouse, (Rectangle){0, 0, (float)GetScreenWidth(), engine->camera.top_bar_height})) {
             engine->camera.target_goal_x -= (double)delta.x / engine->camera.zoom_goal;
@@ -709,16 +738,15 @@ void blueprint_engine_draw(BlueprintEngine *engine) {
     ClearBackground((Color){8, 11, 16, 255});
     draw_top_bar(engine);
 
-    if (engine->active_page == 0 || engine->active_page == 1) {
+    if (engine->active_page >= 0 && engine->active_page <= 5) {
         blueprint_draw_world_grid(engine);
         draw_node_layer(engine, BLUEPRINT_LAYER_GEOMETRY);
         draw_node_layer(engine, BLUEPRINT_LAYER_SIGNALS);
         draw_node_layer(engine, BLUEPRINT_LAYER_MATH);
-        draw_minimap(engine);
-        draw_debug_overlay(engine);
-    } else {
-        DrawText("Page 2", 20, (int)engine->camera.top_bar_height + 20, 24, (Color){220, 225, 235, 255});
-        DrawText("reserved for additional technical canvases", 20, (int)engine->camera.top_bar_height + 52, 18, (Color){130, 145, 165, 255});
+        if (engine->active_page < 2) {
+            draw_minimap(engine);
+            draw_debug_overlay(engine);
+        }
     }
 
     EndDrawing();

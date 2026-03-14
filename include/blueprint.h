@@ -272,6 +272,11 @@ void blueprint_engine_add_node(BlueprintEngine *engine, const BlueprintNode *nod
 
 void blueprint_init_demo(BlueprintEngine *engine);
 void blueprint_reset_demo(BlueprintEngine *engine);
+void blueprint_open_innovation_lab(BlueprintEngine *engine, const char *source_name);
+void blueprint_open_h_lab(BlueprintEngine *engine, const char *source_name);
+void blueprint_open_r_lab(BlueprintEngine *engine, const char *source_name);
+void blueprint_open_hx_lab(BlueprintEngine *engine, const char *source_name);
+bool blueprint_scene_blocks_pan(const BlueprintEngine *engine, Vector2 mouse);
 
 Camera2D blueprint_camera_snapshot(const BlueprintEngine *engine);
 DVec2 blueprint_screen_to_world(const BlueprintEngine *engine, Vector2 screen);
