@@ -54,9 +54,25 @@ static void node_draw_arrow_field(Camera2D cam) {
     const BlueprintNode *node = active_node();
     if (engine == NULL || node == NULL) return;
     ArrowFieldData *field = (ArrowFieldData *)node->user_data;
+    DVec2 base = node->precise_world_position;
+    DVec2 view_min = blueprint_screen_to_world(engine, (Vector2){0.0f, engine->camera.top_bar_height});
+    DVec2 view_max = blueprint_screen_to_world(engine, (Vector2){engine->camera.viewport_width, engine->camera.top_bar_height + engine->camera.viewport_height});
+    double local_min_x = view_min.x - base.x - 48.0;
+    double local_max_x = view_max.x - base.x + 48.0;
+    double local_min_y = view_min.y - base.y - 48.0;
+    double local_max_y = view_max.y - base.y + 48.0;
+    int min_col = (int)floor(local_min_x / field->spacing + field->cols * 0.5);
+    int max_col = (int)ceil(local_max_x / field->spacing + field->cols * 0.5);
+    int min_row = (int)floor(local_min_y / field->spacing + field->rows * 0.5);
+    int max_row = (int)ceil(local_max_y / field->spacing + field->rows * 0.5);
 
-    for (int r = 0; r < field->rows; ++r) {
-        for (int c = 0; c < field->cols; ++c) {
+    if (min_col < 0) min_col = 0;
+    if (min_row < 0) min_row = 0;
+    if (max_col > field->cols) max_col = field->cols;
+    if (max_row > field->rows) max_row = field->rows;
+
+    for (int r = min_row; r < max_row; ++r) {
+        for (int c = min_col; c < max_col; ++c) {
             double x = (c - field->cols * 0.5) * field->spacing;
             double y = (r - field->rows * 0.5) * field->spacing;
             double vx = sin((x + y) * 0.018) + cos(y * 0.035) * 0.55;

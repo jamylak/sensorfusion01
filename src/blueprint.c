@@ -396,7 +396,12 @@ void blueprint_draw_directed_edge(const BlueprintEngine *engine, DVec2 from, DVe
     DVec2 delta = dvec2_sub(to, from);
     DVec2 mid = dvec2_scale(dvec2_add(from, to), 0.5);
     DVec2 control = dvec2_add(mid, dvec2_scale(dvec2_perp(delta), 0.18));
-    const int segments = 24;
+    Vector2 from_screen = blueprint_world_to_screen(engine, from);
+    Vector2 to_screen = blueprint_world_to_screen(engine, to);
+    float dx = to_screen.x - from_screen.x;
+    float dy = to_screen.y - from_screen.y;
+    float screen_length = sqrtf(dx * dx + dy * dy);
+    int segments = (int)clampf(screen_length / 18.0f, 6.0f, 24.0f);
     DVec2 last = from;
     for (int i = 1; i <= segments; ++i) {
         double t = (double)i / (double)segments;
