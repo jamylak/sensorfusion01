@@ -138,6 +138,8 @@ static FusionSceneData *g_fusion_scene = NULL;
 static void destroy_math_scene(MathSceneData *scene);
 static void destroy_fusion_scene(FusionSceneData *scene);
 static void append_factor_graph_samples(FusionSceneData *scene, double t);
+static void draw_math_scene_minimap(const BlueprintEngine *engine, Rectangle map_rect, DVec2 world_min, DVec2 world_max);
+static void draw_fusion_scene_minimap(const BlueprintEngine *engine, Rectangle map_rect, DVec2 world_min, DVec2 world_max);
 static bool hover_world_rect_screen(const BlueprintEngine *engine, DVec2 origin, Vector2 size);
 static void set_matrix_inspector(MatrixInspector *inspector, const char *title, const char *body);
 static void draw_matrix_inspector_box(const MatrixInspector *inspector);
@@ -155,6 +157,18 @@ static void debugger_draw_overlay(void);
 static DVec2 dvec2(double x, double y) {
     DVec2 v = {x, y};
     return v;
+}
+
+static const FactorNode *factor_graph_lookup_node(const FactorGraph *graph, int id) {
+    if (graph == NULL) {
+        return NULL;
+    }
+    for (int i = 0; i < graph->node_count; ++i) {
+        if (graph->nodes[i].id == id) {
+            return &graph->nodes[i];
+        }
+    }
+    return NULL;
 }
 
 static void sync_vector_from_matrix(Vector *vector, const Matrix *matrix) {
@@ -1127,6 +1141,93 @@ static void maybe_describe_fusion_node(const BlueprintEngine *engine, DVec2 cent
     }
 }
 
+static void draw_minimap_rect(Rectangle map_rect, DVec2 world_min, DVec2 world_max, DVec2 min, DVec2 max, Color color) {
+    Vector2 a = blueprint_minimap_project(map_rect, world_min, world_max, min);
+    Vector2 b = blueprint_minimap_project(map_rect, world_min, world_max, max);
+    float x = fminf(a.x, b.x);
+    float y = fminf(a.y, b.y);
+    float w = fabsf(b.x - a.x);
+    float h = fabsf(b.y - a.y);
+    if (w < 2.0f) w = 2.0f;
+    if (h < 2.0f) h = 2.0f;
+    DrawRectangleLinesEx((Rectangle){x, y, w, h}, 1.0f, color);
+}
+
+static void draw_minimap_line(Rectangle map_rect, DVec2 world_min, DVec2 world_max, DVec2 a, DVec2 b, float thickness, Color color) {
+    Vector2 sa = blueprint_minimap_project(map_rect, world_min, world_max, a);
+    Vector2 sb = blueprint_minimap_project(map_rect, world_min, world_max, b);
+    DrawLineEx(sa, sb, thickness, color);
+}
+
+static void draw_math_scene_minimap(const BlueprintEngine *engine, Rectangle map_rect, DVec2 world_min, DVec2 world_max) {
+    (void)engine;
+    if (g_math_scene == NULL) {
+        return;
+    }
+    float cs = g_math_scene->cell_size;
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(-1180.0, -360.0), dvec2(-1180.0 + 3.0 * cs, -360.0 + 3.0 * cs), (Color){246, 178, 92, 220});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(-760.0, -360.0), dvec2(-760.0 + 3.0 * cs, -360.0 + 3.0 * cs), (Color){246, 178, 92, 180});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(20.0, -360.0), dvec2(20.0 + 3.0 * cs, -360.0 + 3.0 * cs), (Color){246, 178, 92, 220});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(560.0, -360.0), dvec2(560.0 + 3.0 * cs, -360.0 + 3.0 * cs), (Color){110, 202, 255, 220});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(-1120.0, 300.0), dvec2(-1120.0 + 2.0 * cs, 300.0 + 2.0 * cs), (Color){188, 132, 255, 220});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(-650.0, 300.0), dvec2(-650.0 + 2.0 * cs, 300.0 + 2.0 * cs), (Color){188, 132, 255, 180});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(-80.0, 300.0), dvec2(-80.0 + 2.0 * cs, 300.0 + 2.0 * cs), (Color){112, 228, 188, 220});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(300.0, 270.0), dvec2(300.0 + g_math_scene->vector_cell_size, 270.0 + 2.0 * g_math_scene->vector_cell_size), (Color){112, 228, 188, 180});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(780.0, 270.0), dvec2(780.0 + g_math_scene->vector_cell_size, 270.0 + 2.0 * g_math_scene->vector_cell_size), (Color){246, 168, 96, 220});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(360.0, 640.0), dvec2(360.0 + 2.0 * cs, 640.0 + 2.0 * cs), (Color){244, 126, 172, 220});
+    for (int i = 0; i < g_math_scene->node_count; ++i) {
+        DVec2 c = dvec2(g_math_scene->nodes[i].position.x, g_math_scene->nodes[i].position.y);
+        Vector2 p = blueprint_minimap_project(map_rect, world_min, world_max, c);
+        DrawCircleV(p, 2.5f, (Color){228, 236, 244, 220});
+    }
+    draw_minimap_line(map_rect, world_min, world_max, dvec2(-1000.0, -180.0), dvec2(-320.0, -170.0), 1.0f, (Color){246, 178, 92, 180});
+    draw_minimap_line(map_rect, world_min, world_max, dvec2(-580.0, -180.0), dvec2(-320.0, -170.0), 1.0f, (Color){246, 178, 92, 180});
+    draw_minimap_line(map_rect, world_min, world_max, dvec2(-320.0, -170.0), dvec2(120.0, -180.0), 1.0f, (Color){246, 178, 92, 180});
+    draw_minimap_line(map_rect, world_min, world_max, dvec2(-20.0, 360.0), dvec2(560.0, 470.0), 1.0f, (Color){112, 228, 188, 180});
+    draw_minimap_line(map_rect, world_min, world_max, dvec2(-1000.0, 360.0), dvec2(40.0, 760.0), 1.0f, (Color){244, 126, 172, 160});
+}
+
+static void draw_fusion_scene_minimap(const BlueprintEngine *engine, Rectangle map_rect, DVec2 world_min, DVec2 world_max) {
+    (void)engine;
+    if (g_fusion_scene == NULL) {
+        return;
+    }
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(-325.0, -298.0), dvec2(-115.0, -202.0), (Color){118, 208, 255, 220});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(235.0, -298.0), dvec2(445.0, -202.0), (Color){248, 176, 102, 220});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(790.0, -298.0), dvec2(1010.0, -202.0), (Color){196, 132, 255, 220});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(-1280.0, 420.0), dvec2(-1280.0 + 5.0 * g_fusion_scene->cell_size, 420.0 + 5.0 * g_fusion_scene->cell_size), (Color){118, 208, 255, 180});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(-760.0, 420.0), dvec2(-760.0 + 5.0 * g_fusion_scene->cell_size, 420.0 + 5.0 * g_fusion_scene->cell_size), (Color){244, 170, 116, 180});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(-220.0, 420.0), dvec2(-220.0 + 5.0 * g_fusion_scene->cell_size, 420.0 + 3.3 * g_fusion_scene->cell_size), (Color){248, 176, 102, 180});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(340.0, 420.0), dvec2(340.0 + 5.0 * g_fusion_scene->cell_size, 420.0 + 3.3 * g_fusion_scene->cell_size), (Color){196, 132, 255, 180});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(900.0, 420.0), dvec2(900.0 + 5.0 * g_fusion_scene->cell_size, 420.0 + 2.0 * g_fusion_scene->cell_size), (Color){248, 176, 102, 180});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(1320.0, 420.0), dvec2(1320.0 + 5.0 * g_fusion_scene->cell_size, 420.0 + 2.0 * g_fusion_scene->cell_size), (Color){196, 132, 255, 180});
+    draw_minimap_rect(map_rect, world_min, world_max, dvec2(-1320.0, 860.0), dvec2(-1320.0 + 12.0 * 5.0 * 18.0f / 5.0, 860.0 + 5.0 * 18.0f), (Color){168, 186, 210, 140});
+    draw_minimap_line(map_rect, world_min, world_max, dvec2(-900.0, -70.0), dvec2(-340.0, -250.0), 1.0f, (Color){118, 208, 255, 180});
+    draw_minimap_line(map_rect, world_min, world_max, dvec2(-100.0, -250.0), dvec2(340.0, -40.0), 1.0f, (Color){118, 208, 255, 180});
+    draw_minimap_line(map_rect, world_min, world_max, dvec2(340.0, -40.0), dvec2(450.0, -250.0), 1.0f, (Color){248, 176, 102, 180});
+    draw_minimap_line(map_rect, world_min, world_max, dvec2(560.0, -250.0), dvec2(900.0, -250.0), 1.0f, (Color){196, 132, 255, 180});
+    if (g_fusion_scene->factor_graph.node_count > 1) {
+        for (int i = 0; i < g_fusion_scene->vehicle_track_count; ++i) {
+            VehicleTrack track = g_fusion_scene->vehicle_tracks[i];
+            if (track.start_node < 0 || track.end_node <= track.start_node) {
+                continue;
+            }
+            for (int node_id = track.start_node + 1; node_id <= track.end_node; ++node_id) {
+                const FactorNode *prev = factor_graph_lookup_node(&g_fusion_scene->factor_graph, node_id - 1);
+                const FactorNode *cur = factor_graph_lookup_node(&g_fusion_scene->factor_graph, node_id);
+                if (prev == NULL || cur == NULL) {
+                    continue;
+                }
+                draw_minimap_line(map_rect, world_min, world_max,
+                                  dvec2(prev->world_position.x, prev->world_position.y),
+                                  dvec2(cur->world_position.x, cur->world_position.y),
+                                  1.0f,
+                                  i == 0 ? (Color){110, 202, 255, 180} : (i == 1 ? (Color){132, 236, 176, 180} : (Color){255, 184, 108, 180}));
+            }
+        }
+    }
+}
+
 static void debugger_execute_current_step(FusionSceneData *scene) {
     if (scene == NULL || scene->debugger.step_count == 0) return;
     AlgorithmStep *step = &scene->debugger.steps[scene->debugger.current_step];
@@ -1467,12 +1568,13 @@ static void destroy_fusion_scene(FusionSceneData *scene) {
     free(scene);
 }
 
-static void add_node(BlueprintEngine *engine, const char *name, BlueprintLayer layer, int page, void (*draw)(Camera2D cam), DVec2 bounds_min, DVec2 bounds_max) {
+static void add_node(BlueprintEngine *engine, const char *name, BlueprintLayer layer, int page, void (*draw)(Camera2D cam), void (*draw_minimap)(const BlueprintEngine *engine, Rectangle map_rect, DVec2 world_min, DVec2 world_max), DVec2 bounds_min, DVec2 bounds_max) {
     BlueprintNode node = {0};
     strncpy(node.name, name, sizeof(node.name) - 1);
     node.layer = layer;
     node.page = page;
     node.draw = draw;
+    node.draw_minimap = draw_minimap;
     node.bounds_min = bounds_min;
     node.bounds_max = bounds_max;
     node.visible = true;
@@ -1486,8 +1588,8 @@ void blueprint_init_demo(BlueprintEngine *engine) {
         fprintf(stderr, "failed to allocate demo scenes\n");
         exit(1);
     }
-    add_node(engine, "math-scene", BLUEPRINT_LAYER_MATH, 0, draw_math_scene_node, g_math_scene->scene_min, g_math_scene->scene_max);
-    add_node(engine, "fusion-scene", BLUEPRINT_LAYER_MATH, 1, draw_fusion_scene_node, g_fusion_scene->scene_min, g_fusion_scene->scene_max);
+    add_node(engine, "math-scene", BLUEPRINT_LAYER_MATH, 0, draw_math_scene_node, draw_math_scene_minimap, g_math_scene->scene_min, g_math_scene->scene_max);
+    add_node(engine, "fusion-scene", BLUEPRINT_LAYER_MATH, 1, draw_fusion_scene_node, draw_fusion_scene_minimap, g_fusion_scene->scene_min, g_fusion_scene->scene_max);
 }
 
 void blueprint_reset_demo(BlueprintEngine *engine) {

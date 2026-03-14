@@ -126,6 +126,10 @@ static Vector2 minimap_world_to_screen(Rectangle map_rect, DVec2 world_min, DVec
     return (Vector2){x, y};
 }
 
+Vector2 blueprint_minimap_project(Rectangle map_rect, DVec2 world_min, DVec2 world_max, DVec2 point) {
+    return minimap_world_to_screen(map_rect, world_min, world_max, point);
+}
+
 static DVec2 minimap_screen_to_world(Rectangle map_rect, DVec2 world_min, DVec2 world_max, Vector2 point) {
     double tx = clampd((point.x - map_rect.x) / map_rect.width, 0.0, 1.0);
     double ty = clampd((point.y - map_rect.y) / map_rect.height, 0.0, 1.0);
@@ -166,6 +170,13 @@ static void draw_minimap(const BlueprintEngine *engine) {
 
     for (size_t i = 0; i < engine->count; ++i) {
         const BlueprintNode *node = &engine->nodes[i];
+        if (!node->visible || node->page != engine->active_page) {
+            continue;
+        }
+        if (node->draw_minimap != NULL) {
+            node->draw_minimap(engine, map_rect, world_min, world_max);
+            continue;
+        }
         Vector2 a = minimap_world_to_screen(map_rect, world_min, world_max, node->bounds_min);
         Vector2 b = minimap_world_to_screen(map_rect, world_min, world_max, node->bounds_max);
         float x = fminf(a.x, b.x);

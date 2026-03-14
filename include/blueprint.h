@@ -133,6 +133,7 @@ typedef struct SimulationFrame {
 struct MathNode;
 struct EstimationNode;
 struct SensorFusionNode;
+struct BlueprintEngine;
 
 typedef struct MathNode {
     char name[64];
@@ -176,6 +177,7 @@ typedef struct BlueprintNode {
     char name[64];
     Vector2 world_position;
     void (*draw)(Camera2D cam);
+    void (*draw_minimap)(const struct BlueprintEngine *engine, Rectangle map_rect, DVec2 world_min, DVec2 world_max);
     DVec2 precise_world_position;
     DVec2 bounds_min;
     DVec2 bounds_max;
@@ -197,7 +199,7 @@ typedef struct {
     float top_bar_height;
 } BlueprintCamera;
 
-typedef struct {
+typedef struct BlueprintEngine {
     BlueprintNode *nodes;
     size_t count;
     size_t capacity;
@@ -269,6 +271,7 @@ Camera2D blueprint_camera_snapshot(const BlueprintEngine *engine);
 DVec2 blueprint_screen_to_world(const BlueprintEngine *engine, Vector2 screen);
 Vector2 blueprint_world_to_screen(const BlueprintEngine *engine, DVec2 world);
 float blueprint_world_length_to_screen(const BlueprintEngine *engine, double length);
+Vector2 blueprint_minimap_project(Rectangle map_rect, DVec2 world_min, DVec2 world_max, DVec2 point);
 DVec2 blueprint_node_origin(void);
 const BlueprintEngine *blueprint_active_engine(void);
 const BlueprintNode *blueprint_active_node(void);
