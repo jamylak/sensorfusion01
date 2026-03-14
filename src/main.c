@@ -1290,6 +1290,13 @@ static void draw_innovation_scene_node(Camera2D cam) {
     DVec2 predicted = dvec2(g_innovation_scene->predicted_state.mean.data[0], g_innovation_scene->predicted_state.mean.data[1]);
     DVec2 measured = g_innovation_scene->measurement_point;
     DVec2 innovation_tip = dvec2(g_innovation_scene->innovation.innovation.data[0], g_innovation_scene->innovation.innovation.data[1]);
+    DVec2 z_story_origin = dvec2(-2280.0, 520.0);
+    DVec2 z_sensor_origin = dvec2(z_story_origin.x - 210.0, z_story_origin.y - 40.0);
+    DVec2 z_vehicle_origin = dvec2(z_story_origin.x + (truth.x - g_innovation_scene->projection_reference.x) * 0.12,
+                                   z_story_origin.y + (truth.y - g_innovation_scene->projection_reference.y) * 0.12);
+    DVec2 z_sample_origin = dvec2(z_story_origin.x + 250.0 + (measured.x - truth.x) * 0.16,
+                                  z_story_origin.y + (measured.y - truth.y) * 0.16);
+    DVec2 z_vector_origin = dvec2(z_story_origin.x + 560.0, z_story_origin.y - 6.0);
     MatrixInspector inspector = {0};
     int linked_state = -1;
     int linked_measurement = -1;
@@ -1304,6 +1311,83 @@ static void draw_innovation_scene_node(Camera2D cam) {
     blueprint_draw_gaussian_state(engine, &g_innovation_scene->predicted_state, (Color){120, 196, 255, 255}, NULL);
     blueprint_draw_measurement_covariance(engine, measured, &g_innovation_scene->measurement_model.R, Fade(g_innovation_scene->accent, 0.9f), NULL);
     draw_true_vehicle_marker(engine, &g_innovation_scene->true_vehicle, (Color){238, 238, 244, 255});
+
+    {
+        Vector z_vector = {2, g_innovation_scene->measurement_model.z.data};
+        Vector2 sensor_screen = blueprint_world_to_screen(engine, z_sensor_origin);
+        Vector2 vehicle_screen = blueprint_world_to_screen(engine, z_vehicle_origin);
+        Vector2 sample_screen = blueprint_world_to_screen(engine, z_sample_origin);
+        Vector2 story_screen = blueprint_world_to_screen(engine, dvec2(z_story_origin.x - 130.0, z_story_origin.y - 150.0));
+
+        DrawText("where z comes from", (int)story_screen.x, (int)story_screen.y, 18, (Color){214, 222, 232, 255});
+        DrawText("GPS observes the true vehicle and emits a noisy sample", (int)story_screen.x, (int)story_screen.y + 24, 14, (Color){150, 168, 188, 255});
+        DrawCircleV(sensor_screen, 7.0f, g_innovation_scene->accent);
+        DrawCircleLinesV(sensor_screen, 12.0f, Fade(g_innovation_scene->accent, 0.85f));
+        DrawCircleV(vehicle_screen, 6.0f, (Color){238, 238, 244, 255});
+        DrawCircleV(sample_screen, 7.0f, g_innovation_scene->accent);
+        DrawCircleLinesV(sample_screen, 12.0f, Fade(g_innovation_scene->accent, 0.85f));
+        DrawText("gps sensor", (int)sensor_screen.x + 10, (int)sensor_screen.y - 10, 14, g_innovation_scene->accent);
+        DrawText("true vehicle", (int)vehicle_screen.x + 10, (int)vehicle_screen.y - 10, 14, (Color){236, 236, 244, 255});
+        DrawText("z sample", (int)sample_screen.x + 10, (int)sample_screen.y - 10, 14, g_innovation_scene->accent);
+
+        blueprint_draw_signal_arrow(engine, z_sensor_origin, z_vehicle_origin, 1.2f, Fade(g_innovation_scene->accent, 0.4f), 0.04);
+        blueprint_draw_signal_arrow(engine, z_sensor_origin, z_sample_origin, 1.9f, g_innovation_scene->accent, 0.12);
+        blueprint_draw_arrow(engine, z_vehicle_origin, z_sample_origin, 1.6f, Fade(g_innovation_scene->accent, 0.7f));
+        blueprint_draw_measurement_covariance(engine, z_sample_origin, &g_innovation_scene->measurement_model.R, Fade(g_innovation_scene->accent, 0.72f), NULL);
+        blueprint_draw_vector_visual(engine, &z_vector, z_vector_origin, g_innovation_scene->cell_size, true, "z", g_innovation_scene->accent);
+        blueprint_draw_tensor_flow_edge(engine, z_sample_origin, dvec2(z_vector_origin.x - 92.0, z_vector_origin.y + g_innovation_scene->cell_size), g_innovation_scene->accent, "sample -> vector", true);
+
+        if (hover_world_circle_screen(engine, z_sensor_origin, 14.0f)) {
+            set_matrix_inspector(&inspector, "gps sensor",
+                                 "This is the physical source of z. It observes the true vehicle position and produces a noisy position sample.");
+            linked_measurement = 1;
+        }
+        if (hover_world_circle_screen(engine, z_vehicle_origin, 12.0f)) {
+            set_matrix_inspector(&inspector, "true vehicle for z",
+                                 "The real vehicle state being observed. z starts here in the physical world before it becomes a measurement vector.");
+            linked_measurement = 1;
+        }
+        if (hover_world_circle_screen(engine, z_sample_origin, 14.0f)) {
+            set_matrix_inspector(&inspector, "z sample",
+                                 "This point is the actual GPS reading. It is z in world coordinates: true vehicle position plus measurement noise.");
+            linked_measurement = 1;
+        }
+        if (hover_world_rect(engine, z_vector_origin, (Vector2){g_innovation_scene->cell_size, g_innovation_scene->cell_size * 2.0f})) {
+            set_matrix_inspector(&inspector, "measurement vector z",
+                                 "The same GPS sample rewritten as a two-entry measurement vector used by the innovation equation y = z - Hx.");
+            linked_measurement = 1;
+        }
+        if (hover_screen_label((Vector2){story_screen.x, story_screen.y}, "where z comes from", 18)) {
+            set_matrix_inspector(&inspector, "where z comes from",
+                                 "Dedicated page-3 vignette for the origin of z: real vehicle, GPS observation, noisy sample, then measurement vector.");
+            linked_measurement = 1;
+        }
+        if (hover_screen_label((Vector2){story_screen.x, story_screen.y + 24.0f}, "GPS observes the true vehicle and emits a noisy sample", 14)) {
+            set_matrix_inspector(&inspector, "z definition",
+                                 "z is the GPS sensor output for the vehicle at this instant. It is a noisy position measurement in meters.");
+            linked_measurement = 1;
+        }
+        if (hover_screen_label((Vector2){sensor_screen.x + 10.0f, sensor_screen.y - 10.0f}, "gps sensor", 14)) {
+            set_matrix_inspector(&inspector, "gps sensor",
+                                 "Physical sensor model producing z from the vehicle's true position.");
+            linked_measurement = 1;
+        }
+        if (hover_screen_label((Vector2){vehicle_screen.x + 10.0f, vehicle_screen.y - 10.0f}, "true vehicle", 14)) {
+            set_matrix_inspector(&inspector, "true vehicle",
+                                 "The object in the real world being measured by the GPS sensor.");
+            linked_measurement = 1;
+        }
+        if (hover_screen_label((Vector2){sample_screen.x + 10.0f, sample_screen.y - 10.0f}, "z sample", 14)) {
+            set_matrix_inspector(&inspector, "z sample",
+                                 "Noisy position sample produced by the GPS sensor. This becomes the z vector used later in the math.");
+            linked_measurement = 1;
+        }
+        if (hover_screen_label(blueprint_world_to_screen(engine, dvec2(z_vector_origin.x, z_vector_origin.y - g_innovation_scene->cell_size * 0.8)), "z", 16)) {
+            set_matrix_inspector(&inspector, "z vector",
+                                 "Measurement-space form of the GPS sample. Same physical sample, now represented as the two numbers used in the innovation equation.");
+            linked_measurement = 1;
+        }
+    }
 
     blueprint_draw_arrow(engine, truth, predicted, 1.6f, (Color){120, 196, 255, 180});
     blueprint_draw_arrow(engine, truth, measured, 1.6f, Fade(g_innovation_scene->accent, 0.75f));
@@ -1431,8 +1515,8 @@ static void draw_innovation_scene_node(Camera2D cam) {
             "Vec4 state = {px, py, vx, vy};",
             "Mat2x4 H = {{1,0,0,0},{0,1,0,0}};",
             "Vec2 predicted = H * state;",
-            "Vec2 measurement = z;",
-            "Vec2 innovation = measurement - predicted;"
+            "Vec2 z = gps.observe(vehicle_position) + noise;",
+            "Vec2 innovation = z - predicted;"
         };
         int active_line = 4;
         Color code_color = (Color){255, 236, 170, 255};
@@ -1463,7 +1547,7 @@ static void draw_innovation_scene_node(Camera2D cam) {
                                  active_line == 0 ? "Loads the physical vehicle estimate into the state vector used by the filter." :
                                  active_line == 1 ? "Defines the observation model that tells the sensor which physical quantities it can see." :
                                  active_line == 2 ? "Computes predicted measurement Hx from the current vehicle estimate." :
-                                 active_line == 3 ? "Uses the actual sensor observation z from the same vehicle." :
+                                 active_line == 3 ? "Defines z as the noisy GPS observation coming from the real vehicle." :
                                                     "Subtracts prediction from observation to form the innovation.");
         }
     }
@@ -1508,6 +1592,12 @@ static void draw_innovation_scene_node(Camera2D cam) {
     if (linked_measurement >= 0) {
         Matrix wrapper = {g_innovation_scene->projected_measurement.size, 1, g_innovation_scene->projected_measurement.data};
         blueprint_draw_matrix_heatmap(engine, &wrapper, dvec2(projection_origin.x + 560.0, projection_origin.y + 60.0), g_innovation_scene->cell_size, true, linked_measurement, 0, linked_measurement, 0, "Hx");
+    }
+    if (linked_measurement == 1) {
+        Matrix z_wrapper = {g_innovation_scene->measurement_model.z.size, 1, g_innovation_scene->measurement_model.z.data};
+        blueprint_draw_matrix_heatmap(engine, &z_wrapper, z_vector_origin, g_innovation_scene->cell_size, true, 0, 0, 0, 0, "z");
+        draw_world_focus_ring(engine, z_sensor_origin, innovation_measurement_color(1), 16.0f);
+        draw_world_focus_ring(engine, z_sample_origin, innovation_measurement_color(1), 18.0f);
     }
     blueprint_draw_tensor_flow_edge(engine, dvec2(projection_origin.x + 70.0, projection_origin.y + 110.0), dvec2(projection_origin.x + 280.0, projection_origin.y + 80.0), (Color){120, 196, 255, 255}, "state -> sensor space", true);
     blueprint_draw_tensor_flow_edge(engine, dvec2(projection_origin.x + 440.0, projection_origin.y + 80.0), dvec2(projection_origin.x + 560.0, projection_origin.y + 110.0), g_innovation_scene->accent, "projection", true);
