@@ -25,6 +25,8 @@ typedef struct BlueprintNode {
     Vector2 world_position;
     void (*draw)(Camera2D cam);
     DVec2 precise_world_position;
+    DVec2 bounds_min;
+    DVec2 bounds_max;
     void *user_data;
     BlueprintLayer layer;
     bool visible;
@@ -112,6 +114,9 @@ float blueprint_world_length_to_screen(const BlueprintEngine *engine, double len
 DVec2 blueprint_node_origin(void);
 const BlueprintEngine *blueprint_active_engine(void);
 const BlueprintNode *blueprint_active_node(void);
+bool blueprint_world_rect_visible(const BlueprintEngine *engine, DVec2 min, DVec2 max, double padding);
+bool blueprint_world_segment_visible(const BlueprintEngine *engine, DVec2 a, DVec2 b, double padding);
+bool blueprint_world_point_visible(const BlueprintEngine *engine, DVec2 point, double padding);
 
 void blueprint_draw_world_grid(const BlueprintEngine *engine);
 void blueprint_draw_arrow(const BlueprintEngine *engine, DVec2 from, DVec2 to, float thickness, Color color);

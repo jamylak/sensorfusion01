@@ -15,6 +15,14 @@ static DVec2 dvec2(double x, double y) {
     return v;
 }
 
+static DVec2 dvec2_min(DVec2 a, DVec2 b) {
+    return dvec2(fmin(a.x, b.x), fmin(a.y, b.y));
+}
+
+static DVec2 dvec2_max(DVec2 a, DVec2 b) {
+    return dvec2(fmax(a.x, b.x), fmax(a.y, b.y));
+}
+
 static DVec2 origin_offset(double x, double y) {
     DVec2 base = blueprint_node_origin();
     return dvec2(base.x + x, base.y + y);
@@ -55,6 +63,9 @@ static void node_draw_arrow_field(Camera2D cam) {
             double vy = cos((x - y) * 0.020) - sin(x * 0.032) * 0.55;
             DVec2 from = origin_offset(x, y);
             DVec2 to = origin_offset(x + vx * field->vector_scale, y + vy * field->vector_scale);
+            if (!blueprint_world_segment_visible(engine, from, to, 24.0)) {
+                continue;
+            }
             blueprint_draw_arrow(engine, from, to, 1.2f, (Color){110, 224, 255, 235});
         }
     }
@@ -153,6 +164,11 @@ static void add_node(BlueprintEngine *engine, const char *name, DVec2 position, 
     blueprint_engine_add_node(engine, &node);
 }
 
+static void set_node_bounds(BlueprintEngine *engine, size_t index, DVec2 min, DVec2 max) {
+    engine->nodes[index].bounds_min = min;
+    engine->nodes[index].bounds_max = max;
+}
+
 static GraphClusterData make_cluster(void) {
     GraphClusterData cluster = {0};
     cluster.point_count = 180;
@@ -222,10 +238,30 @@ void blueprint_init_demo(BlueprintEngine *engine) {
     cov->radius_scale = 42.0;
 
     add_node(engine, "heatmap", dvec2(-820.0, -420.0), BLUEPRINT_LAYER_MATH, heatmap, node_draw_heatmap);
+    set_node_bounds(engine, engine->count - 1, dvec2(-820.0, -510.0), dvec2(-820.0 + 6.0 * 34.0, -420.0 + 6.0 * 34.0));
     add_node(engine, "vector-field", dvec2(420.0, -110.0), BLUEPRINT_LAYER_GEOMETRY, field, node_draw_arrow_field);
+    {
+        double half_span = field->spacing * field->rows * 0.5 + field->vector_scale + 40.0;
+        set_node_bounds(engine, engine->count - 1, dvec2(420.0 - half_span, -110.0 - half_span - 140.0), dvec2(420.0 + half_span, -110.0 + half_span));
+    }
     add_node(engine, "graph-cluster", dvec2(-140.0, 620.0), BLUEPRINT_LAYER_SIGNALS, cluster, node_draw_graph_cluster);
+    {
+        DVec2 min = dvec2(1e9, 1e9);
+        DVec2 max = dvec2(-1e9, -1e9);
+        for (int i = 0; i < cluster->point_count; ++i) {
+            min = dvec2_min(min, cluster->points[i]);
+            max = dvec2_max(max, cluster->points[i]);
+        }
+        min.x += -140.0 - 50.0;
+        min.y += 620.0 - 50.0;
+        max.x += -140.0 + 50.0;
+        max.y += 620.0 + 50.0;
+        set_node_bounds(engine, engine->count - 1, min, max);
+    }
     add_node(engine, "matmul", dvec2(1220.0, 340.0), BLUEPRINT_LAYER_MATH, matmul, node_draw_matrix_multiply);
+    set_node_bounds(engine, engine->count - 1, dvec2(1220.0, 250.0), dvec2(1220.0 + 620.0, 340.0 + 5.0 * 36.0 + 40.0));
     add_node(engine, "covariance", dvec2(-1180.0, 760.0), BLUEPRINT_LAYER_GEOMETRY, cov, node_draw_covariance);
+    set_node_bounds(engine, engine->count - 1, dvec2(-1380.0, 550.0), dvec2(-980.0, 960.0));
 }
 
 int main(void) {

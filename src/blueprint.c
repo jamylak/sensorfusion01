@@ -69,6 +69,15 @@ static DVec2 viewport_center(const BlueprintEngine *engine) {
     return dvec2(engine->camera.viewport_width * 0.5, engine->camera.top_bar_height + engine->camera.viewport_height * 0.5);
 }
 
+static void get_world_view_bounds(const BlueprintEngine *engine, DVec2 *out_min, DVec2 *out_max) {
+    DVec2 top_left = blueprint_screen_to_world(engine, (Vector2){0.0f, engine->camera.top_bar_height});
+    DVec2 bottom_right = blueprint_screen_to_world(engine, (Vector2){engine->camera.viewport_width, engine->camera.top_bar_height + engine->camera.viewport_height});
+    out_min->x = fmin(top_left.x, bottom_right.x);
+    out_min->y = fmin(top_left.y, bottom_right.y);
+    out_max->x = fmax(top_left.x, bottom_right.x);
+    out_max->y = fmax(top_left.y, bottom_right.y);
+}
+
 Camera2D blueprint_camera_snapshot(const BlueprintEngine *engine) {
     DVec2 center = viewport_center(engine);
     Camera2D cam = {0};
@@ -85,6 +94,26 @@ const BlueprintEngine *blueprint_active_engine(void) {
 
 const BlueprintNode *blueprint_active_node(void) {
     return g_active_node;
+}
+
+bool blueprint_world_rect_visible(const BlueprintEngine *engine, DVec2 min, DVec2 max, double padding) {
+    DVec2 view_min;
+    DVec2 view_max;
+    get_world_view_bounds(engine, &view_min, &view_max);
+    return !(max.x < view_min.x - padding ||
+             min.x > view_max.x + padding ||
+             max.y < view_min.y - padding ||
+             min.y > view_max.y + padding);
+}
+
+bool blueprint_world_segment_visible(const BlueprintEngine *engine, DVec2 a, DVec2 b, double padding) {
+    DVec2 min = dvec2(fmin(a.x, b.x), fmin(a.y, b.y));
+    DVec2 max = dvec2(fmax(a.x, b.x), fmax(a.y, b.y));
+    return blueprint_world_rect_visible(engine, min, max, padding);
+}
+
+bool blueprint_world_point_visible(const BlueprintEngine *engine, DVec2 point, double padding) {
+    return blueprint_world_rect_visible(engine, point, point, padding);
 }
 
 DVec2 blueprint_node_origin(void) {
@@ -287,8 +316,9 @@ void blueprint_draw_world_grid(const BlueprintEngine *engine) {
     }
 
     double minor = spacing / 5.0;
-    DVec2 top_left = blueprint_screen_to_world(engine, (Vector2){0.0f, engine->camera.top_bar_height});
-    DVec2 bottom_right = blueprint_screen_to_world(engine, (Vector2){engine->camera.viewport_width, engine->camera.top_bar_height + engine->camera.viewport_height});
+    DVec2 top_left;
+    DVec2 bottom_right;
+    get_world_view_bounds(engine, &top_left, &bottom_right);
 
     double start_x_minor = floor(top_left.x / minor) * minor;
     double start_y_minor = floor(top_left.y / minor) * minor;
@@ -439,11 +469,18 @@ void blueprint_draw_dense_cluster(const BlueprintEngine *engine, const GraphClus
     for (int i = 0; i < cluster->edge_count; ++i) {
         DVec2 from = dvec2_add(origin, cluster->edges[i].from);
         DVec2 to = dvec2_add(origin, cluster->edges[i].to);
+        if (!blueprint_world_segment_visible(engine, from, to, 32.0)) {
+            continue;
+        }
         blueprint_draw_directed_edge(engine, from, to, 1.0f, edge_color, (i % 3) == 0);
     }
     float radius = clampf(blueprint_world_length_to_screen(engine, cluster->radius), 1.0f, 4.0f);
     for (int i = 0; i < cluster->point_count; ++i) {
-        Vector2 p = blueprint_world_to_screen(engine, dvec2_add(origin, cluster->points[i]));
+        DVec2 world = dvec2_add(origin, cluster->points[i]);
+        if (!blueprint_world_point_visible(engine, world, cluster->radius * 4.0)) {
+            continue;
+        }
+        Vector2 p = blueprint_world_to_screen(engine, world);
         DrawCircleV(p, radius, node_color);
     }
 }
@@ -477,6 +514,9 @@ static void draw_node_layer(BlueprintEngine *engine, BlueprintLayer layer) {
     for (size_t i = 0; i < engine->count; ++i) {
         BlueprintNode *node = &engine->nodes[i];
         if (!node->visible || node->layer != layer || node->draw == NULL) {
+            continue;
+        }
+        if (!blueprint_world_rect_visible(engine, node->bounds_min, node->bounds_max, 80.0 / engine->camera.zoom)) {
             continue;
         }
         g_active_node = node;
