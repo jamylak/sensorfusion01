@@ -407,7 +407,7 @@ static void handle_camera_input(BlueprintEngine *engine) {
     }
     if (IsKeyPressed(KEY_Q)) engine->quit_requested = true;
 
-    if (engine->active_page == 0) {
+    if (engine->active_page == 0 || engine->active_page == 1) {
         handle_minimap_input(engine, mouse);
     }
 

@@ -1120,6 +1120,13 @@ static void maybe_describe_math_node(const BlueprintEngine *engine, const MathNo
     }
 }
 
+static void maybe_describe_fusion_node(const BlueprintEngine *engine, DVec2 center, Vector2 size, const char *title, const char *description, MatrixInspector *inspector) {
+    DVec2 origin = dvec2(center.x - size.x * 0.5, center.y - size.y * 0.5);
+    if (hover_world_rect_screen(engine, origin, size)) {
+        set_matrix_inspector(inspector, title, description);
+    }
+}
+
 static void debugger_execute_current_step(FusionSceneData *scene) {
     if (scene == NULL || scene->debugger.step_count == 0) return;
     AlgorithmStep *step = &scene->debugger.steps[scene->debugger.current_step];
@@ -1199,6 +1206,9 @@ static void draw_fusion_scene_node(Camera2D cam) {
     draw_sensor_node(engine, &g_fusion_scene->imu_node, imu_node_center, (Vector2){210.0f, 96.0f}, (Color){118, 208, 255, 255}, 0, "IMU Prediction");
     draw_sensor_node(engine, &g_fusion_scene->gps_node, gps_node_center, (Vector2){210.0f, 96.0f}, (Color){248, 176, 102, 255}, 1, "GPS Update");
     draw_sensor_node(engine, &g_fusion_scene->camera_node, camera_node_center, (Vector2){220.0f, 96.0f}, (Color){196, 132, 255, 255}, 2, "Camera VO");
+    maybe_describe_fusion_node(engine, imu_node_center, (Vector2){210.0f, 96.0f}, "IMU Prediction", "Continuous motion-model node. Integrates inertial input to predict the next state and propagate covariance with F P F^T + Q.", &matrix_inspector);
+    maybe_describe_fusion_node(engine, gps_node_center, (Vector2){210.0f, 96.0f}, "GPS Update", "Absolute-position measurement update. Compares predicted position against GPS, forms innovation/S/K, and pulls the estimate back toward the measurement.", &matrix_inspector);
+    maybe_describe_fusion_node(engine, camera_node_center, (Vector2){220.0f, 96.0f}, "Camera VO", "Relative-motion update. Uses visual odometry pose change to refine the GPS-corrected state and tighten uncertainty along observed motion directions.", &matrix_inspector);
 
     blueprint_draw_tensor_flow_edge(engine, dvec2(-900.0, -70.0), dvec2(imu_node_center.x - 120.0, imu_node_center.y), (Color){118, 208, 255, 255}, "state", fusion_node_active(engine, 0));
     blueprint_draw_tensor_flow_edge(engine, dvec2(imu_node_center.x + 120.0, imu_node_center.y), predicted, (Color){118, 208, 255, 255}, "x^-, P^-", fusion_node_active(engine, 0));
