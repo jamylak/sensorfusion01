@@ -2,6 +2,10 @@
 
 This repo is mostly AI-generated and built for fast visualization, not for code quality.
 
+
+https://github.com/user-attachments/assets/e6bef4df-8447-460a-a1ea-753e23ac8b10
+
+
 ## Controls
 
 - `q`: quit
